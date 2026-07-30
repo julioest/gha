@@ -17,6 +17,7 @@
 #   gha -w         watch newest run live in the FOREGROUND (blocks)
 #   gha -N         watch newest run in the BACKGROUND + notify on finish
 #   gha --web      open the Actions page in a browser
+#   gha --bare     hide the dim column-label header row
 #   gha --demo     preview the UX with synthetic data (try: gha --demo -L, -i -L)
 #
 # Repo: $GHA_REPO, else the `upstream`/`origin` remote of the current repo,
@@ -37,6 +38,7 @@ mode=runs
 watch_id=""
 preview_id=""
 emit_lines=false
+bare=false
 
 # Subcommand: `gha pr` shows the current branch's PR checks.
 [[ "${1:-}" == "pr" ]] && { mode=pr; shift; }
@@ -57,7 +59,8 @@ while [[ $# -gt 0 ]]; do
     -f|--failed) failed_only=true; shift ;;
     -n)          limit="${2:?-n needs a number}"; shift 2 ;;
     --web)       web=true; shift ;;
-    -h|--help)   sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --bare)      bare=true; shift ;;         # hide the column-label header line
+    -h|--help)   sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)          echo "gha: unknown flag $1" >&2; exit 2 ;;
     *)           branch="$1"; all=false; shift ;;
   esac
@@ -125,8 +128,11 @@ elif [[ -n "${FORCE_COLOR:-}${CLICOLOR_FORCE:-}${GHA_COLOR:-}" ]] || [[ -t 1 ]] 
 fi
 if $_color; then
   G=$'\e[32m'; R=$'\e[31m'; Y=$'\e[33m'; C=$'\e[36m'; M=$'\e[35m'; D=$'\e[90m'; B=$'\e[1m'; X=$'\e[0m'
+  # P — a soft periwinkle for branch names, so they read as their own column
+  # instead of blending into the dim gray used for timestamps and rules.
+  P=$'\e[38;5;110m'
 else
-  G=""; R=""; Y=""; C=""; M=""; D=""; B=""; X=""
+  G=""; R=""; Y=""; C=""; M=""; D=""; B=""; X=""; P=""
 fi
 use_links=false; [[ -t 1 ]] && use_links=true
 
@@ -518,8 +524,12 @@ if ! $interactive; then
   [[ -z "$termw" && -t 1 ]] && termw=$(stty size </dev/tty 2>/dev/null | awk '{print $2}')
   [[ "$termw" =~ ^[0-9]+$ ]] || termw=88
   (( termw < 40 )) && termw=88
-  rulew=$termw; (( rulew > 92 )) && rulew=92
-  rule=$(printf '%*s' "$rulew" ''); echo "${D}${rule// /─}${X}"
+  # Cap how wide the table lays out. Rows right-pin their times to this width and
+  # the rule spans exactly the same width, so the divider matches the rows (no
+  # overhang) and ultra-wide windows don't open a huge title→time void. Override
+  # with GHA_MAXWIDTH; the responsive column choices below still use the real termw.
+  maxw="${GHA_MAXWIDTH:-100}"; loutw=$termw; (( loutw > maxw )) && loutw=$maxw
+  rule=$(printf '%*s' "$loutw" ''); echo "${D}${rule// /─}${X}"
 
   # Responsive column plan. Layout is space-between: a left cluster (icon +
   # workflow + branch + event), a flex title, and a right-pinned meta block
@@ -537,6 +547,20 @@ if ! $interactive; then
   (( show_wf )) && Lw=$(( Lw + 2 + wf_w ))
   (( show_br )) && Lw=$(( Lw + 2 + br_w ))
   (( show_ev )) && Lw=$(( Lw + 2 + ev_w ))
+
+  # Dim column-label row so the table reads without prior knowledge. Lists only
+  # the columns actually shown at this width, left→right. Suppress with --bare or
+  # GHA_NOHEADER=1 for the terse everyday view.
+  if ! $bare && [[ -z "${GHA_NOHEADER:-}" ]]; then
+    leg="state"
+    (( show_wf )) && leg+=" · workflow"
+    (( show_br )) && leg+=" · branch"
+    (( show_ev )) && leg+=" · event"
+    leg+=" · title"
+    (( show_dur )) && leg+=" · took"
+    leg+=" · when"
+    echo "${D}${leg}${X}"
+  fi
 fi
 
 # ── Rows ───────────────────────────────────────────────────────────────────
@@ -566,8 +590,8 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
   ev="$(ev_abbr "$event")"
 
   # Failure-forward: tint the whole row (name/branch/event/title) red for hard
-  # failures so they pop among a wall of green checks. Others keep dim/cyan.
-  tint=""; brc="$D"; evc="$C"
+  # failures so they pop among a wall of green checks. Others keep periwinkle/cyan.
+  tint=""; brc="$P"; evc="$C"
   case "$conclusion" in
     failure|timed_out|startup_failure) tint="$R"; brc="$R"; evc="$R" ;;
   esac
@@ -618,12 +642,13 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
   fi
   metalen=${#meta_plain}
 
-  # Flex title fills the gap; the meta block sits flush at the right edge.
-  avail=$(( termw - 2 - Lw - 3 - metalen )); (( avail < 10 )) && avail=10
+  # Flex title fills the gap; the meta block sits flush at the right edge of the
+  # capped layout width (loutw), so times stay column-aligned without sprawling.
+  avail=$(( loutw - 2 - Lw - 3 - metalen )); (( avail < 10 )) && avail=10
   (( avail > 100 )) && avail=100
   t="$title"; (( ${#t} > avail )) && t="${t:0:avail-1}…"
   tcell="$(hlink "$run_url" "${tint}${t}${X}")"
-  pad=$(( termw - 2 - Lw - 2 - ${#t} - metalen )); (( pad < 1 )) && pad=1
+  pad=$(( loutw - 2 - Lw - 2 - ${#t} - metalen )); (( pad < 1 )) && pad=1
   printf -v gap '%*s' "$pad" ''
   printf '  %s  %s%s%s\n' "$left" "$tcell" "$gap" "$meta_col"
 done < <(echo "$json" | jq -r '
