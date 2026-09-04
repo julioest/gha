@@ -6,6 +6,8 @@ Mirrors the repo's Actions page — latest runs across **all** branches by defau
 with live-ticking timers, an interactive `fzf` picker, and desktop notifications
 when a run finishes. Runs on **macOS and Linux**.
 
+<img src="docs/01-default.png" width="880" alt="gha showing the latest runs across all branches: a running deploy, a queued lint, a passing CI run and a failing one.">
+
 ## Usage
 
 ```
@@ -26,6 +28,21 @@ gha --demo     preview the UX with synthetic data (try: gha --demo -L, -i -L)
 
 Repo resolution: `$GHA_REPO`, else the `upstream`/`origin` remote of the current
 repo, else whatever `gh` resolves for the directory.
+
+## Screens
+
+`gha -i` opens an `fzf` picker. The preview pane shows the selected run's jobs,
+and the footer keys open it on GitHub, tail logs, rerun, or watch in the background.
+
+<img src="docs/04-picker.png" width="880" alt="The interactive picker: a run list on top, the selected run's jobs in a preview pane below.">
+
+`gha pr` narrows to the checks on the current branch's open PR.
+
+<img src="docs/02-pr.png" width="880" alt="gha pr listing the workflow checks for the current branch's pull request.">
+
+`gha -f` shows only what broke.
+
+<img src="docs/03-failed.png" width="880" alt="gha -f showing only the failed run.">
 
 ## Requirements
 
