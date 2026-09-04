@@ -122,6 +122,8 @@ open_url() {
 # Color decision: NO_COLOR disables it (the de-facto standard); FORCE_COLOR /
 # CLICOLOR_FORCE / GHA_COLOR force it on (e.g. through a pipe); otherwise it's on
 # for a terminal, or when emitting fzf list lines (rendered via --ansi).
+# GHA_LINKS likewise forces OSC 8 hyperlinks on: live view captures a child frame
+# through a pipe but paints it to a real terminal, so links still resolve.
 _color=false
 if [[ -n "${NO_COLOR:-}" ]]; then _color=false
 elif [[ -n "${FORCE_COLOR:-}${CLICOLOR_FORCE:-}${GHA_COLOR:-}" ]] || [[ -t 1 ]] || $emit_lines; then _color=true
@@ -134,7 +136,8 @@ if $_color; then
 else
   G=""; R=""; Y=""; C=""; M=""; D=""; B=""; X=""; P=""
 fi
-use_links=false; [[ -t 1 ]] && use_links=true
+use_links=false
+{ [[ -t 1 ]] || [[ -n "${GHA_LINKS:-}" ]]; } && use_links=true
 
 # hlink URL TEXT — wrap TEXT in an OSC 8 hyperlink (plain TEXT when unsupported).
 hlink() {
@@ -375,7 +378,7 @@ if [[ "$mode" == watchheader ]]; then
     runline+="${runline:+   }● ${rn:-run} $(live_elapsed "$rc")"
   done < <(printf '%s' "$hjson" | jq -r '.[] | select(.status=="in_progress") | [(.name//"run"),.createdAt] | join("\u001f")' 2>/dev/null)
   [[ -n "$runline" ]] && printf '%s\n' "$runline"
-  printf 'columns · took · when · workflow · branch · title\n'
+  printf 'state · took · when · workflow · branch · title\n'
   printf '↵ open   ^L logs   ^R rerun   ^W watch(bg)   ^P panel   esc quit'
   wd="$CACHE_DIR/watching"
   if [[ -d "$wd" ]]; then
@@ -397,6 +400,10 @@ fi
 if $live && ! $interactive; then
   interval="${GHA_INTERVAL:-1}"
   export GHA_CACHED=1                            # frames render from cache; bg refresh
+  # Each frame is captured with $(...), so the child's stdout is a pipe: it would
+  # otherwise drop color and hyperlinks and fall back to the default width. We
+  # paint to a real terminal, so force all three on for the child.
+  export GHA_COLOR=1 GHA_LINKS=1
   # Fix a demo anchor once so child frames share it and the timer advances.
   [[ -n "${GHA_DEMO:-}" && -z "${GHA_DEMO_START:-}" ]] && export GHA_DEMO_START="$(date -u +%s)"
   sub=(-n "$limit"); $failed_only && sub+=(-f)
@@ -407,7 +414,9 @@ if $live && ! $interactive; then
   while :; do
     # Build the whole frame first, then paint it in ONE write so the terminal
     # never shows a half-cleared/half-drawn list (no flicker on refresh).
-    frame="$(GHA_REPO="$repo" "$0" "${sub[@]}" 2>/dev/null || true)"
+    # Re-read the width every frame so resizing the window reflows the table.
+    w="${GHA_WIDTH:-$(stty size </dev/tty 2>/dev/null | awk '{print $2}')}"
+    frame="$(GHA_REPO="$repo" GHA_WIDTH="$w" "$0" "${sub[@]}" 2>/dev/null || true)"
     footer="${G}●${X} ${D}live · every ${interval}s · $(date "+%H:%M:%S") · Ctrl-C to stop${X}"
     printf '\e[H%s\n%s\e[J' "$frame" "$footer"
     sleep "$interval"
