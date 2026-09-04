@@ -329,7 +329,7 @@ if [[ "$mode" == pr ]]; then
   echo "$cj" | jq -r '.[] | [.bucket,(.name//""),(.workflow//""),(.startedAt//""),(.completedAt//""),(.link//"")] | join("\u001f")' \
   | while IFS=$'\x1f' read -r bucket cname cwf cstart cend clink; do
       case "$bucket" in
-        pass)    ic="${G}✔${X}" ;; fail) ic="${R}✖${X}" ;;
+        pass)    ic="${G}✓${X}" ;; fail) ic="${R}✗${X}" ;;
         pending) ic="${Y}●${X}" ;; skipping) ic="${D}–${X}" ;;
         cancel)  ic="${D}⊘${X}" ;; *) ic="${D}?${X}" ;;
       esac
@@ -346,7 +346,7 @@ fi
 if [[ "$mode" == preview ]]; then
   if [[ -n "${GHA_DEMO:-}" ]]; then
     printf '%b Production deploy (demo)  ·  run #%s\n\nJOBS\n%b build (12s)\n%b test (3m1s)\n%b deploy (running)\n\n(demo preview — no real run)\n' \
-      "${G}●${X}" "$preview_id" "${G}✔${X}" "${G}✔${X}" "${Y}●${X}"; exit 0
+      "${G}●${X}" "$preview_id" "${G}✓${X}" "${G}✓${X}" "${Y}●${X}"; exit 0
   fi
   mkdir -p "$CACHE_DIR" 2>/dev/null || true
   pf="$CACHE_DIR/prev-${preview_id}.txt"; ttl="${GHA_POLL:-6}"
@@ -520,9 +520,9 @@ if ! $interactive; then
 
   scope="$(hlink "$actions_url" "${B}${repo}${X}")"
   ! $all && scope+=" ${D}— ${branch}${X}"
-  sum="${G}✔ ${ok}${X}  ${R}✖ ${fail}${X}"
+  sum="${G}✓ ${ok}${X}  ${R}✗ ${fail}${X}"
   (( run   > 0 )) && sum+="  ${Y}● ${run}${X}"
-  (( queue > 0 )) && sum+="  ${Y}◌ ${queue}${X}"
+  (( queue > 0 )) && sum+="  ${Y}○ ${queue}${X}"
   upd=""; [[ "$latest" != "-" ]] && upd="  ${D}· updated $(rel "$latest") ago${X}"
   echo "${scope}   ${sum}${upd}"
 
@@ -584,8 +584,8 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
   case "$status" in
     completed)
       case "$conclusion" in
-        success)                             icon="${G}✔${X}"; dur_p="$(dur "$created" "$updated")" ;;
-        failure|timed_out|startup_failure)   icon="${R}✖${X}"; dur_p="$(dur "$created" "$updated")" ;;
+        success)                             icon="${G}✓${X}"; dur_p="$(dur "$created" "$updated")" ;;
+        failure|timed_out|startup_failure)   icon="${R}✗${X}"; dur_p="$(dur "$created" "$updated")" ;;
         cancelled)                           icon="${D}⊘${X}"; dur_p="$(dur "$created" "$updated")" ;;
         skipped)                             icon="${D}–${X}"; dur_p="" ;;
         action_required)                     icon="${Y}!${X}"; dur_p="" ;;
@@ -593,7 +593,7 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
       esac
       age_p="$(rel "$updated") ago"; metacol="" ;;
     in_progress) icon="${Y}●${X}"; dur_p="$(live_elapsed "$created")"; age_p=""; metacol="$Y" ;;
-    queued|waiting|requested|pending) icon="${Y}◌${X}"; dur_p="queued"; age_p="$(rel "$created") ago"; metacol="$Y" ;;
+    queued|waiting|requested|pending) icon="${Y}○${X}"; dur_p="queued"; age_p="$(rel "$created") ago"; metacol="$Y" ;;
     *) icon="${D}?${X}"; dur_p="$status"; age_p=""; metacol="$D" ;;
   esac
   ev="$(ev_abbr "$event")"
