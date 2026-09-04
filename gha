@@ -19,6 +19,7 @@
 #   gha --web      open the Actions page in a browser
 #   gha --bare     hide the dim column-label header row
 #   gha --demo     preview the UX with synthetic data (try: gha --demo -L, -i -L)
+#   gha --ascii    plain ASCII marks, for fonts with no symbol coverage
 #
 # Repo: $GHA_REPO, else the `upstream`/`origin` remote of the current repo,
 # else whatever `gh` resolves for this directory. Requires: gh, jq (fzf for -i).
@@ -39,6 +40,7 @@ watch_id=""
 preview_id=""
 emit_lines=false
 bare=false
+ascii=false
 
 # Subcommand: `gha pr` shows the current branch's PR checks.
 [[ "${1:-}" == "pr" ]] && { mode=pr; shift; }
@@ -60,7 +62,8 @@ while [[ $# -gt 0 ]]; do
     -n)          limit="${2:?-n needs a number}"; shift 2 ;;
     --web)       web=true; shift ;;
     --bare)      bare=true; shift ;;         # hide the column-label header line
-    -h|--help)   sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --ascii)     ascii=true; shift ;;        # plain marks for symbol-less fonts
+    -h|--help)   sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)          echo "gha: unknown flag $1" >&2; exit 2 ;;
     *)           branch="$1"; all=false; shift ;;
   esac
@@ -138,6 +141,22 @@ else
 fi
 use_links=false
 { [[ -t 1 ]] || [[ -n "${GHA_LINKS:-}" ]]; } && use_links=true
+
+# Glyphs. GHA_ASCII=1 (or --ascii) swaps every non-ASCII mark for a plain
+# equivalent, for terminal fonts with no symbol coverage: Monaco has none of
+# these, not even ●, and SF Mono is missing the dotted circle. Every ASCII
+# replacement is ONE column wide, like the glyph it stands in for, because the
+# table pads and truncates on character counts (see the ELL uses below).
+[[ -n "${GHA_ASCII:-}" ]] && ascii=true
+if $ascii; then
+  I_OK='+'; I_BAD='x'; I_RUN='*'; I_QUEUE='o'; I_CANCEL='/'; I_SKIP='-'
+  I_WATCH='@'; I_WAIT='@'; ELL='~'; SEP='.'; RULE='-'; DASH='-'
+  PTR='>'; PICK='|'; ENTER='enter'
+else
+  I_OK='✓'; I_BAD='✗'; I_RUN='●'; I_QUEUE='○'; I_CANCEL='⊘'; I_SKIP='–'
+  I_WATCH='⏱'; I_WAIT='⏳'; ELL='…'; SEP='·'; RULE='─'; DASH='—'
+  PTR='▸'; PICK='▍'; ENTER='↵'
+fi
 
 # hlink URL TEXT — wrap TEXT in an OSC 8 hyperlink (plain TEXT when unsupported).
 hlink() {
@@ -301,14 +320,14 @@ if $watch; then
     ran=""; [[ -n "$cs" && -n "$cu" ]] && ran=" in $(dur "$cs" "$cu")"
     rm -f "$CACHE_DIR/watching/$id" 2>/dev/null || true
     case "$cc" in
-      success) notify "✓ ${wf:-run} passed${ran}"       "${repo} · ${hb:-?}" "$run_url" ;;
-      *)       notify "✗ ${wf:-run} ${cc:-failed}${ran}" "${repo} · ${hb:-?}" "$run_url" ;;
+      success) notify "${I_OK} ${wf:-run} passed${ran}"       "${repo} ${SEP} ${hb:-?}" "$run_url" ;;
+      *)       notify "${I_BAD} ${wf:-run} ${cc:-failed}${ran}" "${repo} ${SEP} ${hb:-?}" "$run_url" ;;
     esac
   ) >/dev/null 2>&1 &
   disown 2>/dev/null || true
   what="$(hlink "$run_url" "${Y}${wfname:-run} #${id}${X}")"
-  echo "⏳ watching ${what} ${D}· ${wbranch:-…}${X}"
-  echo "${D}   background — you'll get a notification when it finishes  (\`gha -w\` to watch it live)${X}"
+  echo "${I_WAIT} watching ${what} ${D}${SEP} ${wbranch:-${ELL}}${X}"
+  echo "${D}   background ${DASH} you'll get a notification when it finishes  (\`gha -w\` to watch it live)${X}"
   exit 0
 fi
 
@@ -329,9 +348,9 @@ if [[ "$mode" == pr ]]; then
   echo "$cj" | jq -r '.[] | [.bucket,(.name//""),(.workflow//""),(.startedAt//""),(.completedAt//""),(.link//"")] | join("\u001f")' \
   | while IFS=$'\x1f' read -r bucket cname cwf cstart cend clink; do
       case "$bucket" in
-        pass)    ic="${G}✓${X}" ;; fail) ic="${R}✗${X}" ;;
-        pending) ic="${Y}●${X}" ;; skipping) ic="${D}–${X}" ;;
-        cancel)  ic="${D}⊘${X}" ;; *) ic="${D}?${X}" ;;
+        pass)    ic="${G}${I_OK}${X}" ;; fail) ic="${R}${I_BAD}${X}" ;;
+        pending) ic="${Y}${I_RUN}${X}" ;; skipping) ic="${D}${I_SKIP}${X}" ;;
+        cancel)  ic="${D}${I_CANCEL}${X}" ;; *) ic="${D}?${X}" ;;
       esac
       d=""; [[ -n "$cstart" && -n "$cend" ]] && d="$(dur "$cstart" "$cend")"
       nm="$cname"; [[ -n "$clink" ]] && nm="$(hlink "$clink" "$cname")"
@@ -345,8 +364,8 @@ fi
 # (no per-reload network stall = no preview flicker); refreshes in the background.
 if [[ "$mode" == preview ]]; then
   if [[ -n "${GHA_DEMO:-}" ]]; then
-    printf '%b Production deploy (demo)  ·  run #%s\n\nJOBS\n%b build (12s)\n%b test (3m1s)\n%b deploy (running)\n\n(demo preview — no real run)\n' \
-      "${G}●${X}" "$preview_id" "${G}✓${X}" "${G}✓${X}" "${Y}●${X}"; exit 0
+    printf '%b Production deploy (demo)  %s  run #%s\n\nJOBS\n%b build (12s)\n%b test (3m1s)\n%b deploy (running)\n\n(demo preview %s no real run)\n' \
+      "${G}${I_RUN}${X}" "$SEP" "$preview_id" "${G}${I_OK}${X}" "${G}${I_OK}${X}" "${Y}${I_RUN}${X}" "$DASH"; exit 0
   fi
   mkdir -p "$CACHE_DIR" 2>/dev/null || true
   pf="$CACHE_DIR/prev-${preview_id}.txt"; ttl="${GHA_POLL:-6}"
@@ -375,11 +394,11 @@ if [[ "$mode" == watchheader ]]; then
   runline=""
   while IFS=$'\x1f' read -r rn rc; do
     [[ -z "$rc" ]] && continue
-    runline+="${runline:+   }● ${rn:-run} $(live_elapsed "$rc")"
+    runline+="${runline:+   }${I_RUN} ${rn:-run} $(live_elapsed "$rc")"
   done < <(printf '%s' "$hjson" | jq -r '.[] | select(.status=="in_progress") | [(.name//"run"),.createdAt] | join("\u001f")' 2>/dev/null)
   [[ -n "$runline" ]] && printf '%s\n' "$runline"
-  printf 'state · took · when · workflow · branch · title\n'
-  printf '↵ open   ^L logs   ^R rerun   ^W watch(bg)   ^P panel   esc quit'
+  printf 'state %s took %s when %s workflow %s branch %s title\n' "$SEP" "$SEP" "$SEP" "$SEP" "$SEP"
+  printf '%s open   ^L logs   ^R rerun   ^W watch(bg)   ^P panel   esc quit' "$ENTER"
   wd="$CACHE_DIR/watching"
   if [[ -d "$wd" ]]; then
     items=""
@@ -388,7 +407,7 @@ if [[ "$mode" == watchheader ]]; then
       wn="$(cut -f1 "$f" 2>/dev/null)"
       items+="${items:+, }${wn:-run} #$(basename "$f")"
     done
-    [[ -n "$items" ]] && printf '\n⏱ watching: %s' "$items"
+    [[ -n "$items" ]] && printf '\n%s watching: %s' "$I_WATCH" "$items"
   fi
   exit 0
 fi
@@ -404,6 +423,7 @@ if $live && ! $interactive; then
   # otherwise drop color and hyperlinks and fall back to the default width. We
   # paint to a real terminal, so force all three on for the child.
   export GHA_COLOR=1 GHA_LINKS=1
+  $ascii && export GHA_ASCII=1
   # Fix a demo anchor once so child frames share it and the timer advances.
   [[ -n "${GHA_DEMO:-}" && -z "${GHA_DEMO_START:-}" ]] && export GHA_DEMO_START="$(date -u +%s)"
   sub=(-n "$limit"); $failed_only && sub+=(-f)
@@ -417,7 +437,7 @@ if $live && ! $interactive; then
     # Re-read the width every frame so resizing the window reflows the table.
     w="${GHA_WIDTH:-$(stty size </dev/tty 2>/dev/null | awk '{print $2}')}"
     frame="$(GHA_REPO="$repo" GHA_WIDTH="$w" "$0" "${sub[@]}" 2>/dev/null || true)"
-    footer="${G}●${X} ${D}live · every ${interval}s · $(date "+%H:%M:%S") · Ctrl-C to stop${X}"
+    footer="${G}${I_RUN}${X} ${D}live ${SEP} every ${interval}s ${SEP} $(date "+%H:%M:%S") ${SEP} Ctrl-C to stop${X}"
     printf '\e[H%s\n%s\e[J' "$frame" "$footer"
     sleep "$interval"
   done
@@ -445,7 +465,7 @@ if $interactive && ! $emit_lines; then
   fi
   poll="${GHA_POLL:-6}"
   [[ -n "${GHA_DEMO:-}" && -z "${GHA_DEMO_START:-}" ]] && export GHA_DEMO_START="$(date -u +%s)"
-  env_pfx="GHA_REPO=${repo}"
+  env_pfx="GHA_REPO=${repo}"; $ascii && env_pfx+=" GHA_ASCII=1"
   [[ -n "${GHA_DEMO:-}" ]] && env_pfx+=" GHA_DEMO=1${GHA_DEMO_START:+ GHA_DEMO_START=${GHA_DEMO_START}}"
   lines_cmd="${env_pfx} GHA_CACHED=1 ${0} --fzf-lines -n ${limit}"
   $failed_only && lines_cmd+=" -f"
@@ -486,11 +506,13 @@ if $interactive && ! $emit_lines; then
     if $live; then extra=(--track); load_act+="+reload-sync(sleep ${poll}; ${lines_cmd})"; fi
   fi
 
+  fzf_ascii=(); $ascii && fzf_ascii=(--no-unicode)
   fzf < /dev/null \
     --ansi --delimiter=$'\t' --with-nth=2.. \
+    ${fzf_ascii[@]+"${fzf_ascii[@]}"} \
     --layout=reverse --border=rounded --info=inline --height=100% --cycle --scroll-off=3 \
-    --prompt="${repo} ▸ " --pointer='▍' --border-label=" gha · ${repo} " \
-    --header=$'↵ open   ^L logs   ^R rerun   ^W watch(bg)   ^P panel   esc quit' \
+    --prompt="${repo} ${PTR} " --pointer="$PICK" --border-label=" gha ${SEP} ${repo} " \
+    --header="${ENTER} open   ^L logs   ^R rerun   ^W watch(bg)   ^P panel   esc quit" \
     --preview="$preview" --preview-label=' run detail ' \
     --preview-window='right,52%,border-left,wrap,<100(down,60%,border-top,wrap)' \
     ${extra[@]+"${extra[@]}"} \
@@ -519,11 +541,11 @@ if ! $interactive; then
       ([.[].updatedAt]|max) // "-" ] | @tsv')
 
   scope="$(hlink "$actions_url" "${B}${repo}${X}")"
-  ! $all && scope+=" ${D}— ${branch}${X}"
-  sum="${G}✓ ${ok}${X}  ${R}✗ ${fail}${X}"
-  (( run   > 0 )) && sum+="  ${Y}● ${run}${X}"
-  (( queue > 0 )) && sum+="  ${Y}○ ${queue}${X}"
-  upd=""; [[ "$latest" != "-" ]] && upd="  ${D}· updated $(rel "$latest") ago${X}"
+  ! $all && scope+=" ${D}${DASH} ${branch}${X}"
+  sum="${G}${I_OK} ${ok}${X}  ${R}${I_BAD} ${fail}${X}"
+  (( run   > 0 )) && sum+="  ${Y}${I_RUN} ${run}${X}"
+  (( queue > 0 )) && sum+="  ${Y}${I_QUEUE} ${queue}${X}"
+  upd=""; [[ "$latest" != "-" ]] && upd="  ${D}${SEP} updated $(rel "$latest") ago${X}"
   echo "${scope}   ${sum}${upd}"
 
   # Terminal width for responsive columns. `stty size </dev/tty` reads the real
@@ -538,7 +560,7 @@ if ! $interactive; then
   # overhang) and ultra-wide windows don't open a huge title→time void. Override
   # with GHA_MAXWIDTH; the responsive column choices below still use the real termw.
   maxw="${GHA_MAXWIDTH:-100}"; loutw=$termw; (( loutw > maxw )) && loutw=$maxw
-  rule=$(printf '%*s' "$loutw" ''); echo "${D}${rule// /─}${X}"
+  rule=$(printf '%*s' "$loutw" ''); echo "${D}${rule// /$RULE}${X}"
 
   # Responsive column plan. Layout is space-between: a left cluster (icon +
   # workflow + branch + event), a flex title, and a right-pinned meta block
@@ -562,12 +584,12 @@ if ! $interactive; then
   # GHA_NOHEADER=1 for the terse everyday view.
   if ! $bare && [[ -z "${GHA_NOHEADER:-}" ]]; then
     leg="state"
-    (( show_wf )) && leg+=" · workflow"
-    (( show_br )) && leg+=" · branch"
-    (( show_ev )) && leg+=" · event"
-    leg+=" · title"
-    (( show_dur )) && leg+=" · took"
-    leg+=" · when"
+    (( show_wf )) && leg+=" ${SEP} workflow"
+    (( show_br )) && leg+=" ${SEP} branch"
+    (( show_ev )) && leg+=" ${SEP} event"
+    leg+=" ${SEP} title"
+    (( show_dur )) && leg+=" ${SEP} took"
+    leg+=" ${SEP} when"
     echo "${D}${leg}${X}"
   fi
 fi
@@ -584,16 +606,16 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
   case "$status" in
     completed)
       case "$conclusion" in
-        success)                             icon="${G}✓${X}"; dur_p="$(dur "$created" "$updated")" ;;
-        failure|timed_out|startup_failure)   icon="${R}✗${X}"; dur_p="$(dur "$created" "$updated")" ;;
-        cancelled)                           icon="${D}⊘${X}"; dur_p="$(dur "$created" "$updated")" ;;
-        skipped)                             icon="${D}–${X}"; dur_p="" ;;
+        success)                             icon="${G}${I_OK}${X}"; dur_p="$(dur "$created" "$updated")" ;;
+        failure|timed_out|startup_failure)   icon="${R}${I_BAD}${X}"; dur_p="$(dur "$created" "$updated")" ;;
+        cancelled)                           icon="${D}${I_CANCEL}${X}"; dur_p="$(dur "$created" "$updated")" ;;
+        skipped)                             icon="${D}${I_SKIP}${X}"; dur_p="" ;;
         action_required)                     icon="${Y}!${X}"; dur_p="" ;;
         *)                                   icon="${D}?${X}"; dur_p="" ;;
       esac
       age_p="$(rel "$updated") ago"; metacol="" ;;
-    in_progress) icon="${Y}●${X}"; dur_p="$(live_elapsed "$created")"; age_p=""; metacol="$Y" ;;
-    queued|waiting|requested|pending) icon="${Y}○${X}"; dur_p="queued"; age_p="$(rel "$created") ago"; metacol="$Y" ;;
+    in_progress) icon="${Y}${I_RUN}${X}"; dur_p="$(live_elapsed "$created")"; age_p=""; metacol="$Y" ;;
+    queued|waiting|requested|pending) icon="${Y}${I_QUEUE}${X}"; dur_p="queued"; age_p="$(rel "$created") ago"; metacol="$Y" ;;
     *) icon="${D}?${X}"; dur_p="$status"; age_p=""; metacol="$D" ;;
   esac
   ev="$(ev_abbr "$event")"
@@ -617,8 +639,8 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
       in_progress) dcol="$(live_elapsed "$created")";   acol="" ;;
       *)           dcol="";                              acol="$(rel "$created") ago" ;;
     esac
-    lbr="$hbranch"; (( ${#lbr} > 14 )) && lbr="${lbr:0:13}…"
-    wmark=""; [[ -e "$CACHE_DIR/watching/$id" ]] && wmark=" ${M}⏱${X}"   # being watched
+    lbr="$hbranch"; (( ${#lbr} > 14 )) && lbr="${lbr:0:13}${ELL}"
+    wmark=""; [[ -e "$CACHE_DIR/watching/$id" ]] && wmark=" ${M}${I_WATCH}${X}"   # being watched
     printf -v disp '%b %b%6s%b %b%8s%b  %b%-8.8s%b %b%-14s%b %b%s%b%s' \
       "$icon" "$C" "$dcol" "$X" "$D" "$acol" "$X" "$tint" "$name" "$X" "$brc" "$lbr" "$X" "$tint" "$title" "$X" "$wmark"
     printf '%s\t%s\n' "$id" "$disp"      # --fzf-lines: one row per line for fzf
@@ -633,7 +655,7 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
     left+="  $(hlink "$run_url" "${tint}${c}${X}")"
   fi
   if (( show_br )); then
-    b="$hbranch"; (( ${#b} > br_w )) && b="${b:0:br_w-1}…"
+    b="$hbranch"; (( ${#b} > br_w )) && b="${b:0:br_w-1}${ELL}"
     printf -v c '%-*s' "$br_w" "$b"
     left+="  ${brc}${c}${X}"
   fi
@@ -655,7 +677,7 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
   # capped layout width (loutw), so times stay column-aligned without sprawling.
   avail=$(( loutw - 2 - Lw - 3 - metalen )); (( avail < 10 )) && avail=10
   (( avail > 100 )) && avail=100
-  t="$title"; (( ${#t} > avail )) && t="${t:0:avail-1}…"
+  t="$title"; (( ${#t} > avail )) && t="${t:0:avail-1}${ELL}"
   tcell="$(hlink "$run_url" "${tint}${t}${X}")"
   pad=$(( loutw - 2 - Lw - 2 - ${#t} - metalen )); (( pad < 1 )) && pad=1
   printf -v gap '%*s' "$pad" ''

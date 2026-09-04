@@ -24,6 +24,7 @@ gha -w         watch newest run live in the FOREGROUND (blocks)
 gha -N         watch newest run in the BACKGROUND + notify on finish
 gha --web      open the Actions page in a browser
 gha --demo     preview the UX with synthetic data (try: gha --demo -L, -i -L)
+gha --ascii    plain ASCII marks, for fonts with no symbol coverage
 ```
 
 Repo resolution: `$GHA_REPO`, else the `upstream`/`origin` remote of the current
@@ -51,6 +52,10 @@ and the footer keys open it on GitHub, tail logs, rerun, or watch in the backgro
 - `fzf` and `curl` — for interactive mode (`-i`)
 - **Linux only:** `xdg-utils` (for `--web`) and `libnotify`/`notify-send` (for `-N` banners).
   Both degrade gracefully if absent.
+- A terminal font with basic symbol coverage, for the `✓ ✗ ● ○` status marks.
+  Menlo, SF Mono and JetBrains Mono are fine; **Monaco has none of them** and will
+  show boxes. Run `gha --ascii` (or set `GHA_ASCII=1`) for plain ASCII marks
+  instead, which also switches `fzf`'s border to ASCII.
 
 ## Install
 
