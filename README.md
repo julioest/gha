@@ -30,7 +30,7 @@ repo, else whatever `gh` resolves for the directory.
 ## Requirements
 
 - [`gh`](https://cli.github.com) (authenticated) and [`jq`](https://jqlang.github.io/jq/)
-- `bash` 4+
+- `bash` 3.2+ (the stock macOS `/bin/bash` is fine)
 - `fzf` and `curl` — for interactive mode (`-i`)
 - **Linux only:** `xdg-utils` (for `--web`) and `libnotify`/`notify-send` (for `-N` banners).
   Both degrade gracefully if absent.
@@ -40,9 +40,13 @@ repo, else whatever `gh` resolves for the directory.
 Clone anywhere, then symlink the script onto your `PATH`:
 
 ```sh
-git clone git@github.com:julioest/gha.git ~/dev/gha
+git clone https://github.com/julioest/gha.git ~/dev/gha
 ln -s ~/dev/gha/gha ~/.local/bin/gha   # or any dir on your PATH
 ```
+
+`~/.local/bin` is not on `PATH` by default on macOS. Either add it
+(`export PATH="$HOME/.local/bin:$PATH"` in your shell profile) or symlink
+into a directory that already is, such as `/usr/local/bin`.
 
 ## Quick check
 
@@ -53,3 +57,7 @@ gha --demo -n 4      # static table
 gha --demo -L        # live, ticking timers
 gha --demo -i -L     # interactive picker, live
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
