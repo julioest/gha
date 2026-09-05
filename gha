@@ -158,11 +158,182 @@ fi
 use_links=false
 { [[ -t 1 ]] || [[ -n "${GHA_LINKS:-}" ]]; } && use_links=true
 
+# ── Display width (terminal columns) ───────────────────────────────────────
+# The table lays out in COLUMNS, which is neither the byte length of a string
+# nor its character count: CJK, kana, Hangul and most emoji occupy two columns,
+# and combining marks and variation selectors occupy none — so "⚠️" (U+26A0 plus
+# VS16) is one column, not two. bash's ${#s} counts characters under a UTF-8
+# locale and BYTES under LC_ALL=C/POSIX, so it is the wrong answer either way.
+#
+# Every helper below opens with `local LC_ALL=C`, which makes bash index the
+# string byte by byte whatever the caller's locale is, and decodes UTF-8 by
+# hand. That gives ONE code path with identical results under every locale, and
+# costs no fork: calling out to python or perl once per cell would cost more
+# than the entire render. Results come back in the globals D_W (columns) and
+# D_S (string) rather than on stdout, because $(...) per cell is a subshell per
+# cell. tests/helpers_test.sh exercises all of this against python's
+# unicodedata, under both LC_ALL=POSIX and a UTF-8 locale.
+#
+# The width table is a documented SUBSET of wcwidth, chosen to cover what turns
+# up in branch names and commit titles, not all of Unicode:
+#   zero  combining diacriticals (and their extended/supplement blocks),
+#         Cyrillic/Hebrew/Arabic/Thai/Lao combining marks, the zero-width and
+#         bidi format controls, the CJK and kana combining marks, variation
+#         selectors, combining half marks, U+FEFF, and the tag and variation
+#         selector supplement blocks on plane 14.
+#   two   Hangul Jamo, the wide symbol and dingbat codepoints, the CJK blocks
+#         and their compatibility forms, kana, Bopomofo, Yi, Hangul syllables,
+#         fullwidth forms, Tangut, the emoji and pictograph blocks, and the
+#         CJK ideograph planes.
+# Everything else is one column, East Asian Ambiguous included — which is what
+# a terminal on a Western locale actually draws.
+
+# _dwalk STR LIMIT — walk STR one codepoint at a time, setting:
+#   D_W     total display width of STR, in columns
+#   D_CUT   byte offset of the last codepoint boundary at or before LIMIT columns
+#   D_CUTW  width in columns of STR up to D_CUT
+# LIMIT < 0 measures only. Malformed UTF-8 is consumed one byte at a time as
+# U+FFFD so a bad string still terminates instead of running off the end.
+_dwalk() {
+  local LC_ALL=C s="$1" lim="$2" len i=0 k b cp n w cut_done=0
+  D_W=0; D_CUT=0; D_CUTW=0
+  len=${#s}
+  # Fast path. Printable ASCII is one byte per column and never straddles a cut,
+  # which is the overwhelming majority of workflow names, branches and titles.
+  case "$s" in
+    *[!\ -~]*) ;;
+    *) D_W=$len
+       if (( lim >= 0 && lim < len )); then D_CUT=$lim; D_CUTW=$lim
+       else D_CUT=$len; D_CUTW=$len; fi
+       return 0 ;;
+  esac
+  while (( i < len )); do
+    printf -v b '%d' "'${s:i:1}"; (( b < 0 )) && b=$(( b + 256 ))
+    if   (( b < 0x80 )); then cp=$b;              n=1
+    elif (( b < 0xC2 )); then cp=0xFFFD;          n=1   # stray continuation byte
+    elif (( b < 0xE0 )); then cp=$(( b & 0x1F )); n=2
+    elif (( b < 0xF0 )); then cp=$(( b & 0x0F )); n=3
+    elif (( b < 0xF5 )); then cp=$(( b & 0x07 )); n=4
+    else                      cp=0xFFFD;          n=1   # invalid lead byte
+    fi
+    if (( n > 1 )); then
+      if (( i + n > len )); then cp=0xFFFD; n=1         # sequence cut short
+      else
+        k=1
+        while (( k < n )); do
+          printf -v b '%d' "'${s:i+k:1}"; (( b < 0 )) && b=$(( b + 256 ))
+          cp=$(( (cp << 6) | (b & 0x3F) )); k=$(( k + 1 ))
+        done
+      fi
+    fi
+
+    # Zero first, then wide: some zero-width marks (U+302A–U+302D, U+3099–U+309A)
+    # sit inside blocks that are otherwise wide.
+    w=1
+    if (( cp < 0x0300 )); then :
+    elif (( (cp >= 0x0300 && cp <= 0x036F) || (cp >= 0x0483 && cp <= 0x0489) ||
+            (cp >= 0x0591 && cp <= 0x05BD) || cp == 0x05BF ||
+            (cp >= 0x05C1 && cp <= 0x05C2) || (cp >= 0x05C4 && cp <= 0x05C5) ||
+            cp == 0x05C7 || (cp >= 0x0600 && cp <= 0x0605) ||
+            (cp >= 0x0610 && cp <= 0x061A) || cp == 0x061C ||
+            (cp >= 0x064B && cp <= 0x065F) || cp == 0x0670 ||
+            (cp >= 0x06D6 && cp <= 0x06DD) || (cp >= 0x06DF && cp <= 0x06E4) ||
+            (cp >= 0x06E7 && cp <= 0x06E8) || (cp >= 0x06EA && cp <= 0x06ED) ||
+            cp == 0x0E31 || (cp >= 0x0E34 && cp <= 0x0E3A) ||
+            (cp >= 0x0E47 && cp <= 0x0E4E) || cp == 0x0EB1 ||
+            (cp >= 0x0EB4 && cp <= 0x0EBC) || (cp >= 0x0EC8 && cp <= 0x0ECD) ||
+            (cp >= 0x1AB0 && cp <= 0x1AC0) || (cp >= 0x1DC0 && cp <= 0x1DFF) ||
+            (cp >= 0x200B && cp <= 0x200F) || (cp >= 0x202A && cp <= 0x202E) ||
+            (cp >= 0x2060 && cp <= 0x2064) || (cp >= 0x2066 && cp <= 0x206F) ||
+            (cp >= 0x20D0 && cp <= 0x20F0) || (cp >= 0x302A && cp <= 0x302D) ||
+            (cp >= 0x3099 && cp <= 0x309A) || (cp >= 0xFE00 && cp <= 0xFE0F) ||
+            (cp >= 0xFE20 && cp <= 0xFE2F) || cp == 0xFEFF || cp == 0xE0001 ||
+            (cp >= 0xE0020 && cp <= 0xE007F) ||
+            (cp >= 0xE0100 && cp <= 0xE01EF) )); then w=0
+    elif (( (cp >= 0x1100 && cp <= 0x115F) || (cp >= 0x231A && cp <= 0x231B) ||
+            (cp >= 0x2329 && cp <= 0x232A) || (cp >= 0x23E9 && cp <= 0x23EC) ||
+            cp == 0x23F0 || cp == 0x23F3 || (cp >= 0x25FD && cp <= 0x25FE) ||
+            (cp >= 0x2614 && cp <= 0x2615) || (cp >= 0x2648 && cp <= 0x2653) ||
+            cp == 0x267F || cp == 0x2693 || cp == 0x26A1 ||
+            (cp >= 0x26AA && cp <= 0x26AB) || (cp >= 0x26BD && cp <= 0x26BE) ||
+            (cp >= 0x26C4 && cp <= 0x26C5) || cp == 0x26CE || cp == 0x26D4 ||
+            cp == 0x26EA || (cp >= 0x26F2 && cp <= 0x26F3) || cp == 0x26F5 ||
+            cp == 0x26FA || cp == 0x26FD || cp == 0x2705 ||
+            (cp >= 0x270A && cp <= 0x270B) || cp == 0x2728 || cp == 0x274C ||
+            cp == 0x274E || (cp >= 0x2753 && cp <= 0x2755) || cp == 0x2757 ||
+            (cp >= 0x2795 && cp <= 0x2797) || cp == 0x27B0 || cp == 0x27BF ||
+            (cp >= 0x2B1B && cp <= 0x2B1C) || cp == 0x2B50 || cp == 0x2B55 ||
+            (cp >= 0x2E80 && cp <= 0x303E) || (cp >= 0x3041 && cp <= 0x3247) ||
+            (cp >= 0x3250 && cp <= 0x4DBF) || (cp >= 0x4E00 && cp <= 0xA4C6) ||
+            (cp >= 0xA960 && cp <= 0xA97C) || (cp >= 0xAC00 && cp <= 0xD7A3) ||
+            (cp >= 0xF900 && cp <= 0xFAD9) || (cp >= 0xFE10 && cp <= 0xFE19) ||
+            (cp >= 0xFE30 && cp <= 0xFE6B) || (cp >= 0xFF01 && cp <= 0xFF60) ||
+            (cp >= 0xFFE0 && cp <= 0xFFE6) || (cp >= 0x16FE0 && cp <= 0x16FE3) ||
+            (cp >= 0x17000 && cp <= 0x1B2FB) || cp == 0x1F004 || cp == 0x1F0CF ||
+            cp == 0x1F18E || (cp >= 0x1F191 && cp <= 0x1F19A) ||
+            (cp >= 0x1F200 && cp <= 0x1F320) || (cp >= 0x1F32D && cp <= 0x1F393) ||
+            (cp >= 0x1F3A0 && cp <= 0x1F3F0) || cp == 0x1F3F4 ||
+            (cp >= 0x1F3F8 && cp <= 0x1F4FC) || (cp >= 0x1F4FF && cp <= 0x1F53D) ||
+            (cp >= 0x1F54B && cp <= 0x1F54E) || (cp >= 0x1F550 && cp <= 0x1F567) ||
+            cp == 0x1F57A || (cp >= 0x1F595 && cp <= 0x1F596) || cp == 0x1F5A4 ||
+            (cp >= 0x1F5FB && cp <= 0x1F64F) || (cp >= 0x1F680 && cp <= 0x1F6C5) ||
+            cp == 0x1F6CC || (cp >= 0x1F6D0 && cp <= 0x1F6D2) ||
+            (cp >= 0x1F6D5 && cp <= 0x1F6D7) || (cp >= 0x1F6EB && cp <= 0x1F6EC) ||
+            (cp >= 0x1F6F4 && cp <= 0x1F6FC) || (cp >= 0x1F7E0 && cp <= 0x1F7EB) ||
+            (cp >= 0x1F90C && cp <= 0x1F9FF) || (cp >= 0x1FA70 && cp <= 0x1FAD6) ||
+            (cp >= 0x20000 && cp <= 0x3134A) )); then w=2
+    fi
+
+    if (( lim >= 0 && ! cut_done )); then
+      if (( D_W + w <= lim )); then D_CUT=$(( i + n )); D_CUTW=$(( D_W + w ))
+      else cut_done=1; fi
+    fi
+    D_W=$(( D_W + w ))
+    i=$(( i + n ))
+  done
+  return 0
+}
+
+# dfit STR — display width of STR in columns. → D_W
+dfit() { _dwalk "$1" -1; }
+
+# dtrunc STR COLS [ELLIPSIS] — STR cut to at most COLS columns, with ELLIPSIS
+# appended when anything was dropped; pass "" (or nothing) for a hard cut. The
+# cut always lands on a codepoint boundary, so a multibyte character is never
+# halved and a two-column character straddling the edge is dropped rather than
+# split — which can leave the result one column narrower than COLS. → D_S, D_W
+dtrunc() {
+  local LC_ALL=C s="$1" cols="$2" ell="${3-}" ellw=0 target
+  _dwalk "$s" -1
+  if (( D_W <= cols )); then D_S="$s"; return 0; fi
+  if (( cols <= 0 )); then D_S=""; D_W=0; return 0; fi
+  if [[ -n "$ell" ]]; then _dwalk "$ell" -1; ellw=$D_W; fi
+  # Not enough room for the marker itself: cut hard rather than hand back
+  # something wider than the budget, which would push the whole row out.
+  if (( ellw >= cols )); then ell=""; ellw=0; fi
+  target=$(( cols - ellw ))
+  _dwalk "$s" "$target"
+  D_S="${s:0:D_CUT}$ell"
+  D_W=$(( D_CUTW + ellw ))
+  return 0
+}
+
+# dcell STR COLS [ELLIPSIS] — dtrunc, then pad with spaces out to EXACTLY COLS
+# columns. Every fixed-width cell in the table goes through this. → D_S, D_W
+dcell() {
+  local pad
+  dtrunc "$1" "$2" "${3-}"
+  pad=$(( $2 - D_W ))
+  if (( pad > 0 )); then printf -v D_S '%s%*s' "$D_S" "$pad" ''; fi
+  D_W=$2
+  return 0
+}
+
 # Glyphs. GHA_ASCII=1 (or --ascii) swaps every non-ASCII mark for a plain
 # equivalent, for terminal fonts with no symbol coverage: Monaco has none of
-# these, not even ●, and SF Mono is missing the dotted circle. Every ASCII
-# replacement is ONE column wide, like the glyph it stands in for, because the
-# table pads and truncates on character counts (see the ELL uses below).
+# these, not even ●, and SF Mono is missing the dotted circle. Every replacement
+# is ONE column wide, like the glyph it stands in for, so a row's layout does
+# not shift between the two modes.
 [[ -n "${GHA_ASCII:-}" ]] && ascii=true
 if $ascii; then
   I_OK='+'; I_BAD='x'; I_RUN='*'; I_QUEUE='o'; I_CANCEL='/'; I_SKIP='-'
@@ -687,10 +858,11 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
       in_progress) dcol="$(live_elapsed "$created")";   acol="" ;;
       *)           dcol="";                              acol="$(rel "$created") ago" ;;
     esac
-    lbr="$hbranch"; (( ${#lbr} > 14 )) && lbr="${lbr:0:13}${ELL}"
+    dcell "$hbranch" 14 "$ELL"; lbr="$D_S"
+    dcell "$name" 8; lwf="$D_S"
     wmark=""; [[ -e "$CACHE_DIR/watching/$id" ]] && wmark=" ${M}${I_WATCH}${X}"   # being watched
-    printf -v disp '%b %b%6s%b %b%8s%b  %b%-8.8s%b %b%-14s%b %b%s%b%s' \
-      "$icon" "$C" "$dcol" "$X" "$D" "$acol" "$X" "$tint" "$name" "$X" "$brc" "$lbr" "$X" "$tint" "$title" "$X" "$wmark"
+    printf -v disp '%b %b%6s%b %b%8s%b  %b%s%b %b%s%b %b%s%b%s' \
+      "$icon" "$C" "$dcol" "$X" "$D" "$acol" "$X" "$tint" "$lwf" "$X" "$brc" "$lbr" "$X" "$tint" "$title" "$X" "$wmark"
     printf '%s\t%s\n' "$id" "$disp"      # --fzf-lines: one row per line for fzf
     continue
   fi
@@ -699,17 +871,16 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
   run_url="https://github.com/${repo}/actions/runs/${id}"
   left="$icon"
   if (( show_wf )); then
-    printf -v c '%-*.*s' "$wf_w" "$wf_w" "$name"
-    left+="  $(hlink "$run_url" "${tint}${c}${X}")"
+    dcell "$name" "$wf_w"                     # hard cut: workflow names repeat
+    left+="  $(hlink "$run_url" "${tint}${D_S}${X}")"
   fi
   if (( show_br )); then
-    b="$hbranch"; (( ${#b} > br_w )) && b="${b:0:br_w-1}${ELL}"
-    printf -v c '%-*s' "$br_w" "$b"
-    left+="  ${brc}${c}${X}"
+    dcell "$hbranch" "$br_w" "$ELL"
+    left+="  ${brc}${D_S}${X}"
   fi
   if (( show_ev )); then
-    printf -v c '%-*.*s' "$ev_w" "$ev_w" "$ev"
-    left+="  ${evc}${c}${X}"
+    dcell "$ev" "$ev_w"
+    left+="  ${evc}${D_S}${X}"
   fi
 
   # Meta block (duration + age), right-pinned. Measure the plain text so the
@@ -719,15 +890,17 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
   else
     meta_plain="${age_p}"; meta_col="${D}${age_p}${X}"
   fi
-  metalen=${#meta_plain}
+  dfit "$meta_plain"; metalen=$D_W
 
   # Flex title fills the gap; the meta block sits flush at the right edge of the
   # capped layout width (loutw), so times stay column-aligned without sprawling.
   avail=$(( loutw - 2 - Lw - 3 - metalen )); (( avail < 10 )) && avail=10
   (( avail > 100 )) && avail=100
-  t="$title"; (( ${#t} > avail )) && t="${t:0:avail-1}${ELL}"
+  dtrunc "$title" "$avail" "$ELL"; t="$D_S"; tw=$D_W
   tcell="$(hlink "$run_url" "${tint}${t}${X}")"
-  pad=$(( loutw - 2 - Lw - 2 - ${#t} - metalen )); (( pad < 1 )) && pad=1
+  # tw, not $avail: dtrunc reports what it actually kept, which is a column
+  # short of the budget whenever a two-column character straddled the edge.
+  pad=$(( loutw - 2 - Lw - 2 - tw - metalen )); (( pad < 1 )) && pad=1
   printf -v gap '%*s' "$pad" ''
   printf '  %s  %s%s%s\n' "$left" "$tcell" "$gap" "$meta_col"
 done < <(echo "$json" | jq -r '
