@@ -766,7 +766,7 @@ if $interactive && ! $emit_lines; then
     --bind="start:${start_act}" \
     --bind="load:${load_act}" \
     --bind="enter:execute-silent(gh run view {1} -R ${repo} --web)" \
-    --bind="ctrl-l:execute(gh run view {1} -R ${repo} --log 2>&1 | less -R)" \
+    --bind="ctrl-l:execute(gh run view {1} -R ${repo} --log-failed 2>&1 | less -R)" \
     --bind="ctrl-r:execute(gh run rerun {1} -R ${repo} --failed 2>&1 | less -R)" \
     --bind="ctrl-w:execute-silent(${env_pfx} ${0} --watch-id {1})+reload-sync(${lines_cmd})+transform-header(${hdr_cmd})+bell" \
     --bind="ctrl-o:execute-silent(gh run view {1} -R ${repo} --web)" \
