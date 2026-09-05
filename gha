@@ -351,11 +351,19 @@ hlink() {
   else printf '%s' "$2"; fi
 }
 
+# now_epoch — "now" as epoch seconds. Every clock in the rendering path reads
+# it, so setting $GHA_NOW freezes all of them at once: relative ages, durations
+# and the demo animation phase stop moving and a render becomes reproducible
+# byte for byte. The test suite pins it; nothing else sets it. (It is separate
+# from $GHA_DEMO_START, which anchors only the demo's running→passed cycle and
+# must keep advancing for `gha --demo -L` to animate.)
+now_epoch() { if [[ -n "${GHA_NOW:-}" ]]; then printf '%s' "$GHA_NOW"; else date -u "+%s"; fi; }
+
 # rel TS — relative age of a UTC timestamp, e.g. "3m", "2h", "5d".
 rel() {
   local ts now diff
   ts=$(iso_to_epoch "$1")
-  now=$(date -u "+%s"); diff=$(( now - ts )); (( diff < 0 )) && diff=0
+  now=$(now_epoch); diff=$(( now - ts )); (( diff < 0 )) && diff=0
   if   (( diff < 60 ));    then echo "${diff}s"
   elif (( diff < 3600 ));  then echo "$(( diff / 60 ))m"
   elif (( diff < 86400 )); then echo "$(( diff / 3600 ))h"
@@ -376,7 +384,7 @@ dur() {
 live_elapsed() {
   local s now d
   s=$(iso_to_epoch "$1")
-  now=$(date -u "+%s"); d=$(( now - s )); (( d < 0 )) && d=0
+  now=$(now_epoch); d=$(( now - s )); (( d < 0 )) && d=0
   if (( d < 3600 )); then printf '%d:%02d' $(( d / 60 )) $(( d % 60 ))
   else printf '%dh%02d' $(( d / 3600 )) $(( (d % 3600) / 60 )); fi
 }
@@ -384,11 +392,19 @@ live_elapsed() {
 # demo_json — synthetic run data for --demo so the UX can be previewed without
 # real CI. The Deploy run cycles running→passed every 30s (timer ticks 0:00→0:24,
 # then shows "22s" briefly), alongside a success, a red failure, and a queued run.
+#
+# The last three rows are there for the layout, not the demo: a CJK branch name,
+# an emoji-prefixed title, a title carrying ⚠️ (U+26A0 + VS16, which is one
+# column and not two), an over-long branch and a title long enough to truncate at
+# every supported width. Those are the inputs that tell a column measured in
+# terminal columns apart from one measured in characters or bytes; the test
+# suite asserts every row still lands on the layout width (see tests/README.md).
 _iso() { epoch_to_iso "$1"; }
 demo_json() {
   local start now cyc rcreated rstatus rconcl rupd
-  start="${GHA_DEMO_START:-$(date -u +%s)}"
-  now=$(date -u +%s); cyc=$(( (now - start) % 30 )); (( cyc < 0 )) && cyc=0
+  now=$(now_epoch)
+  start="${GHA_DEMO_START:-$now}"
+  cyc=$(( (now - start) % 30 )); (( cyc < 0 )) && cyc=0
   rcreated="$(_iso $(( now - cyc )))"
   if (( cyc < 25 )); then rstatus='"in_progress"'; rconcl=null; rupd="\"$rcreated\""
   else rstatus='"completed"'; rconcl='"success"'; rupd="\"$(_iso $(( now - cyc + 22 )))\""; fi
@@ -397,7 +413,10 @@ demo_json() {
  {"databaseId":901,"name":"Deploy","headBranch":"develop","status":$rstatus,"conclusion":$rconcl,"displayTitle":"Production deploy (demo)","createdAt":"$rcreated","updatedAt":$rupd,"event":"workflow_run"},
  {"databaseId":902,"name":"CI","headBranch":"develop","status":"completed","conclusion":"success","displayTitle":"Make the runs table responsive at any width","createdAt":"$(_iso $(( now - 300 )))","updatedAt":"$(_iso $(( now - 52 )))","event":"push"},
  {"databaseId":903,"name":"CI","headBranch":"fix-flaky-test","status":"completed","conclusion":"failure","displayTitle":"Try to fix the flaky integration test again","createdAt":"$(_iso $(( now - 1800 )))","updatedAt":"$(_iso $(( now - 1705 )))","event":"pull_request"},
- {"databaseId":904,"name":"Lint","headBranch":"chore/bump-deps","status":"queued","conclusion":null,"displayTitle":"Bump dependencies to latest","createdAt":"$(_iso $(( now - 40 )))","updatedAt":"$(_iso $(( now - 40 )))","event":"pull_request"}
+ {"databaseId":904,"name":"Lint","headBranch":"chore/bump-deps","status":"queued","conclusion":null,"displayTitle":"Bump dependencies to latest","createdAt":"$(_iso $(( now - 40 )))","updatedAt":"$(_iso $(( now - 40 )))","event":"pull_request"},
+ {"databaseId":905,"name":"Release","headBranch":"機能/検索ページ","status":"completed","conclusion":"success","displayTitle":"🚀 Ship the release pipeline","createdAt":"$(_iso $(( now - 7200 )))","updatedAt":"$(_iso $(( now - 7010 )))","event":"release"},
+ {"databaseId":906,"name":"CI","headBranch":"hotfix/queue-worker","status":"completed","conclusion":"failure","displayTitle":"⚠️ Retry storm in the queue worker after the 日次 deploy","createdAt":"$(_iso $(( now - 9000 )))","updatedAt":"$(_iso $(( now - 8880 )))","event":"push"},
+ {"databaseId":907,"name":"Integration","headBranch":"experiment/very-long-branch-name-that-overflows","status":"completed","conclusion":"cancelled","displayTitle":"Rewrite the fixture harness so that every column, at every terminal width, pads to exactly the layout width the header rule uses","createdAt":"$(_iso $(( now - 14400 )))","updatedAt":"$(_iso $(( now - 13980 )))","event":"workflow_dispatch"}
 ]
 JSON
 }
