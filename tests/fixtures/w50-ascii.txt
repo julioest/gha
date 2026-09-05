@@ -1,0 +1,10 @@
+demo/repo   + 2  x 2  * 1  o 1  / 1  . updated 12s ago
+--------------------------------------------------
+state . branch . title . when
+  *  develop           Production deploy (demo)   
+  o  chore/bump-deps   Bump dependencies ~ 40s ago
+  +  develop           Make the runs tabl~ 52s ago
+  x  fix-flaky-test    Try to fix the fla~ 28m ago
+  +  機能/検索ページ   🚀 Ship the release~ 1h ago
+  x  hotfix/queue-wo~  ⚠️ Retry storm in th~ 2h ago
+  /  experiment/very~  Rewrite the fixture~ 3h ago

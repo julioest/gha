@@ -80,6 +80,16 @@ gha --demo -L        # live, ticking timers
 gha --demo -i -L     # interactive picker, live
 ```
 
+## Tests
+
+```sh
+tests/run.sh          # golden renders + width invariant + helper unit tests
+tests/run.sh --update # regenerate the fixtures
+```
+
+Needs `python3` and `jq`. See [tests/README.md](tests/README.md) for what each
+suite asserts and why the display-width measurement lives in python.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: shellcheck
+        run: shellcheck -s bash gha tests/run.sh tests/*_test.sh tests/lib/*.sh
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # jq parses every code path in gha, including --demo. python3 is the test
+      # suite's own dependency: it measures display width, which the script is
+      # deliberately not allowed to fork a process to do.
+      - name: Install jq (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Install jq (macOS)
+        if: runner.os == 'macOS'
+        run: brew list jq >/dev/null 2>&1 || brew install jq
+
+      - name: Versions
+        run: |
+          bash --version | head -1
+          /bin/bash --version | head -1
+          jq --version
+          python3 --version
+
+      - name: Test suite
+        run: ./tests/run.sh
+
+      # gha has to keep working on stock macOS /bin/bash, which is 3.2 and
+      # predates most of what people reach for in modern bash. The macOS runner
+      # has it; on Linux this step is skipped rather than faked.
+      - name: Test suite under bash 3.2 (macOS system bash)
+        if: runner.os == 'macOS'
+        run: /bin/bash ./tests/run.sh

@@ -1,0 +1,10 @@
+demo/repo   ✓ 2  ✗ 2  ● 1  ○ 1  ⊘ 1  · updated 12s ago
+──────────────────────────────────────────────────────────────────────────
+state · workflow · branch · title · took · when
+  ●  Deploy         develop           Production deploy (demo)       0:12 
+  ○  Lint           chore/bump-deps   Bump dependencies to… queued 40s ago
+  ✓  CI             develop           Make the runs table re… 4m8s 52s ago
+  ✗  CI             fix-flaky-test    Try to fix the flaky … 1m35s 28m ago
+  ✓  Release        機能/検索ページ   🚀 Ship the release pi… 3m10s 1h ago
+  ✗  CI             hotfix/queue-wo…  ⚠️ Retry storm in the qu… 2m0s 2h ago
+  ⊘  Integration    experiment/very…  Rewrite the fixture har… 7m0s 3h ago

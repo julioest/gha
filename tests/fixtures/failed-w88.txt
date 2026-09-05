@@ -1,0 +1,6 @@
+demo/repo   ✓ 0  ✗ 2  ⊘ 1  · updated 28m ago
+────────────────────────────────────────────────────────────────────────────────────────
+state · workflow · branch · title · took · when
+  ✗  CI             fix-flaky-test    Try to fix the flaky integration te… 1m35s 28m ago
+  ✗  CI             hotfix/queue-wo…  ⚠️ Retry storm in the queue worker aft… 2m0s 2h ago
+  ⊘  Integration    experiment/very…  Rewrite the fixture harness so that e… 7m0s 3h ago

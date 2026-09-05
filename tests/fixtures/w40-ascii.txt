@@ -1,0 +1,10 @@
+demo/repo   + 2  x 2  * 1  o 1  / 1  . updated 12s ago
+----------------------------------------
+state . title . when
+  *  Production deploy (demo)           
+  o  Bump dependencies to latest 40s ago
+  +  Make the runs table respon~ 52s ago
+  x  Try to fix the flaky integ~ 28m ago
+  +  🚀 Ship the release pipeline 1h ago
+  x  ⚠️ Retry storm in the queue ~ 2h ago
+  /  Rewrite the fixture harness~ 3h ago

@@ -1,0 +1,10 @@
+demo/repo   + 2  x 2  * 1  o 1  / 1  . updated 12s ago
+--------------------------------------------------------------------
+state . branch . title . took . when
+  *  develop           Production deploy (demo)                0:12 
+  o  chore/bump-deps   Bump dependencies to latest    queued 40s ago
+  +  develop           Make the runs table responsive ~ 4m8s 52s ago
+  x  fix-flaky-test    Try to fix the flaky integrati~ 1m35s 28m ago
+  +  機能/検索ページ   🚀 Ship the release pipeline     3m10s 1h ago
+  x  hotfix/queue-wo~  ⚠️ Retry storm in the queue worke~ 2m0s 2h ago
+  /  experiment/very~  Rewrite the fixture harness so t~ 7m0s 3h ago
