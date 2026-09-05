@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# gha — fast GitHub Actions status for the current repo.
+# gha — fast GitHub Actions status for one repo or many.
 #
 # Mirrors the repo's Actions page: latest runs across ALL branches by default.
+# With a repo list configured it merges every repo into one table sorted by
+# recency — the thing `gh` structurally cannot do, being cwd/-R scoped.
 # Run names/titles are Cmd-clickable (open the run on GitHub) in modern terminals.
 #
 # Usage:
 #   gha            latest runs across ALL branches (the Actions page)
+#   gha -R O/R     just this repo (`-R .` resolves it from the git remote)
 #   gha -i         interactive picker (fzf): preview jobs, open, logs, rerun
 #   gha -L         live view: timers tick every $GHA_INTERVAL (1s) from cache;
 #                  network refresh every $GHA_POLL (6s) in the background
@@ -21,8 +24,14 @@
 #   gha --demo     preview the UX with synthetic data (try: gha --demo -L, -i -L)
 #   gha --ascii    plain ASCII marks, for fonts with no symbol coverage
 #
-# Repo: $GHA_REPO, else the `upstream`/`origin` remote of the current repo,
-# else whatever `gh` resolves for this directory. Requires: gh, jq (fzf for -i).
+# Repo scope, first match wins:
+#   -R owner/repo          one repo, explicitly
+#   $GHA_REPO              one repo
+#   $GHA_REPOS             many, comma/space/newline separated
+#   ~/.config/gha/repos    many, one owner/repo per line, # comments allowed
+#   the `upstream`/`origin` remote of the current repo, else `gh`'s answer here
+# `gha pr` is always about the current directory and ignores the repo list.
+# Requires: gh, jq (fzf for -i, curl for -i -L).
 
 set -euo pipefail
 
@@ -47,6 +56,7 @@ notify=false
 mode=runs
 watch_id=""
 preview_id=""
+repo_arg=""
 emit_lines=false
 bare=false
 ascii=false
@@ -69,6 +79,7 @@ while [[ $# -gt 0 ]]; do
     --watch-header) mode=watchheader; shift ;;                           # internal: fzf header
     -f|--failed) failed_only=true; shift ;;
     -n)          limit="${2:?-n needs a number}"; shift 2 ;;
+    -R|--repo)   repo_arg="${2:?-R needs owner/repo}"; shift 2 ;;   # . = from the remote
     --web)       web=true; shift ;;
     --bare)      bare=true; shift ;;         # hide the column-label header line
     --ascii)     ascii=true; shift ;;        # plain marks for symbol-less fonts
@@ -96,19 +107,72 @@ parse_remote() {
     | sed -E 's#^(git@[^:]+:|https?://[^/]+/|ssh://[^/]+/)##; s#\.git$##'
 }
 
-# Resolve which repo to query. Prefer $GHA_REPO, then the fork-workflow-canonical
-# `upstream` remote, then `origin`, then whatever gh resolves for this directory.
-repo="${GHA_REPO:-}"
-[[ -z "$repo" ]] && repo="$(parse_remote upstream)"
-[[ -z "$repo" ]] && repo="$(parse_remote origin)"
-[[ -z "$repo" ]] && repo="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
-[[ -z "$repo" && -n "${GHA_DEMO:-}" ]] && repo="demo/repo"
-if [[ -z "$repo" ]]; then
-  echo "gha: no repo found — run inside a git repo or set GHA_REPO=owner/repo" >&2
+# repo_ok NAME — owner/repo and nothing else. Every name reaching this point is
+# interpolated into an API path and into the fzf bind strings, so the charset is
+# checked once here rather than quoted defensively at a dozen call sites.
+repo_ok() { [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; }
+
+# local_repo — the repo for THIS directory: $GHA_REPO, then the fork-workflow-
+# canonical `upstream` remote, then `origin`, then whatever gh resolves here.
+# `gha pr` and `-R .` use it directly; it is also the fallback when no list is
+# configured, which is what keeps the single-repo path behaving as it always has.
+local_repo() {
+  local r="${GHA_REPO:-}"
+  [[ -z "$r" ]] && r="$(parse_remote upstream)"
+  [[ -z "$r" ]] && r="$(parse_remote origin)"
+  [[ -z "$r" ]] && r="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+  printf '%s' "$r"
+}
+
+# The configured list: $GHA_REPOS wins over the file so a live-view or picker
+# child inherits the parent's exact scope instead of re-reading config.
+REPOS_FILE="${GHA_REPOS_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/gha/repos}"
+read_repo_list() {
+  if [[ -n "${GHA_REPOS:-}" ]]; then printf '%s\n' "$GHA_REPOS" | tr $',\t ' $'\n\n\n'
+  elif [[ -f "$REPOS_FILE" ]]; then cat "$REPOS_FILE"
+  fi
+}
+
+repos=()
+if [[ -n "$repo_arg" ]]; then
+  [[ "$repo_arg" == "." ]] && repo_arg="$(local_repo)"
+  [[ -n "$repo_arg" ]] && repos=("$repo_arg")
+elif [[ -n "${GHA_REPO:-}" ]]; then
+  repos=("$GHA_REPO")
+else
+  while IFS= read -r line; do
+    line="${line%%#*}"                                  # strip comments
+    line="${line// /}"; line="${line//$'\t'/}"; line="${line//$'\r'/}"
+    [[ -z "$line" ]] && continue
+    repos+=("$line")
+  done < <(read_repo_list)
+fi
+# No list anywhere: the original single-repo behaviour, unchanged.
+if (( ${#repos[@]} == 0 )); then
+  line="$(local_repo)"
+  [[ -z "$line" && -n "${GHA_DEMO:-}" ]] && line="demo/repo"
+  [[ -n "$line" ]] && repos=("$line")
+fi
+if (( ${#repos[@]} == 0 )); then
+  echo "gha: no repo found — run inside a git repo, set GHA_REPO=owner/repo," >&2
+  echo "gha: or list repos in $REPOS_FILE" >&2
   exit 1
 fi
+for line in "${repos[@]}"; do
+  repo_ok "$line" || die "not an owner/repo name: '$line'" 2
+done
+
+# multi is about the TABLE, not the config: one configured repo needs no repo
+# column, because there is nothing to tell apart.
+multi=false; (( ${#repos[@]} > 1 )) && multi=true
+repo="${repos[0]}"                       # the one every single-repo path uses
 repo_args=(-R "$repo")
 actions_url="https://github.com/${repo}/actions"
+# scope_label — how the scope is named in the summary line, the picker prompt and
+# its border. A list has no single Actions page to link to, so it is named by its
+# size rather than by one of its members. Set here, not down by the table, because
+# the picker needs it too and never reaches the table code.
+if $multi; then scope_label="${#repos[@]} repos"; else scope_label="$repo"; fi
 
 # ── Portability shims (Linux + macOS) ──────────────────────────────────────
 # BSD (macOS) and GNU (Linux) diverge on date/stat flags and the URL opener.
@@ -390,45 +454,81 @@ live_elapsed() {
   else printf '%dh%02d' $(( d / 3600 )) $(( (d % 3600) / 60 )); fi
 }
 
-# demo_json — synthetic run data for --demo so the UX can be previewed without
-# real CI. The Deploy run cycles running→passed every 30s (timer ticks 0:00→0:24,
-# then shows "22s" briefly), alongside a success, a red failure, and a queued run.
+# demo_json IDX — synthetic run data for --demo so the UX can be previewed
+# without real CI, in the shape the REST endpoint returns. The Deploy run cycles
+# running→passed every 30s (timer ticks 0:00→0:24, then shows "22s" briefly),
+# alongside a success, a red failure, and a queued run.
 #
-# The last three rows are there for the layout, not the demo: a CJK branch name,
-# an emoji-prefixed title, a title carrying ⚠️ (U+26A0 + VS16, which is one
-# column and not two), an over-long branch and a title long enough to truncate at
-# every supported width. Those are the inputs that tell a column measured in
-# terminal columns apart from one measured in characters or bytes; the test
-# suite asserts every row still lands on the layout width (see tests/README.md).
+# Set 0 also carries the rows that exist for the layout rather than the demo: a
+# CJK branch name, an emoji-prefixed title, a title carrying ⚠️ (U+26A0 + VS16,
+# which is one column and not two), an over-long branch and a title long enough
+# to truncate at every supported width. Those are the inputs that tell a column
+# measured in terminal columns apart from one measured in characters or bytes;
+# the test suite asserts every row still lands on the layout width.
+#
+# Sets 1 and 2 belong to the second and third repo of a configured list, and are
+# timed to INTERLEAVE with set 0 rather than to sit above or below it, so the
+# merged multi-repo table only looks right if the recency sort actually works.
+# A list longer than three repos cycles through the three sets.
+#
+# run_started_at is set equal to created_at throughout, so demo durations measure
+# the same span they always did.
 _iso() { epoch_to_iso "$1"; }
 demo_json() {
-  local start now cyc rcreated rstatus rconcl rupd
+  local idx="${1:-0}" start now cyc rcreated rstatus rconcl rupd
   now=$(now_epoch)
   start="${GHA_DEMO_START:-$now}"
   cyc=$(( (now - start) % 30 )); (( cyc < 0 )) && cyc=0
-  rcreated="$(_iso $(( now - cyc )))"
-  if (( cyc < 25 )); then rstatus='"in_progress"'; rconcl=null; rupd="\"$rcreated\""
-  else rstatus='"completed"'; rconcl='"success"'; rupd="\"$(_iso $(( now - cyc + 22 )))\""; fi
-  cat <<JSON
-[
- {"databaseId":901,"name":"Deploy","headBranch":"develop","status":$rstatus,"conclusion":$rconcl,"displayTitle":"Production deploy (demo)","createdAt":"$rcreated","updatedAt":$rupd,"event":"workflow_run"},
- {"databaseId":902,"name":"CI","headBranch":"develop","status":"completed","conclusion":"success","displayTitle":"Make the runs table responsive at any width","createdAt":"$(_iso $(( now - 300 )))","updatedAt":"$(_iso $(( now - 52 )))","event":"push"},
- {"databaseId":903,"name":"CI","headBranch":"fix-flaky-test","status":"completed","conclusion":"failure","displayTitle":"Try to fix the flaky integration test again","createdAt":"$(_iso $(( now - 1800 )))","updatedAt":"$(_iso $(( now - 1705 )))","event":"pull_request"},
- {"databaseId":904,"name":"Lint","headBranch":"chore/bump-deps","status":"queued","conclusion":null,"displayTitle":"Bump dependencies to latest","createdAt":"$(_iso $(( now - 40 )))","updatedAt":"$(_iso $(( now - 40 )))","event":"pull_request"},
- {"databaseId":905,"name":"Release","headBranch":"機能/検索ページ","status":"completed","conclusion":"success","displayTitle":"🚀 Ship the release pipeline","createdAt":"$(_iso $(( now - 7200 )))","updatedAt":"$(_iso $(( now - 7010 )))","event":"release"},
- {"databaseId":906,"name":"CI","headBranch":"hotfix/queue-worker","status":"completed","conclusion":"failure","displayTitle":"⚠️ Retry storm in the queue worker after the 日次 deploy","createdAt":"$(_iso $(( now - 9000 )))","updatedAt":"$(_iso $(( now - 8880 )))","event":"push"},
- {"databaseId":907,"name":"Integration","headBranch":"experiment/very-long-branch-name-that-overflows","status":"completed","conclusion":"cancelled","displayTitle":"Rewrite the fixture harness so that every column, at every terminal width, pads to exactly the layout width the header rule uses","createdAt":"$(_iso $(( now - 14400 )))","updatedAt":"$(_iso $(( now - 13980 )))","event":"workflow_dispatch"}
-]
+  case $(( idx % 3 )) in
+    1)
+      cat <<JSON
+{"workflow_runs":[
+ {"id":9210,"name":"Lint","head_branch":"main","status":"in_progress","conclusion":null,"display_title":"Upgrade eslint to v9","created_at":"$(_iso $(( now - 120 )))","run_started_at":"$(_iso $(( now - 120 )))","updated_at":"$(_iso $(( now - 120 )))","event":"push"},
+ {"id":9211,"name":"Test","head_branch":"main","status":"completed","conclusion":"success","display_title":"Drop the legacy date picker","created_at":"$(_iso $(( now - 600 )))","run_started_at":"$(_iso $(( now - 600 )))","updated_at":"$(_iso $(( now - 402 )))","event":"push"},
+ {"id":9212,"name":"Test","head_branch":"redesign/nav-bar","status":"completed","conclusion":"failure","display_title":"Nav bar overlaps the banner below 900px","created_at":"$(_iso $(( now - 3600 )))","run_started_at":"$(_iso $(( now - 3600 )))","updated_at":"$(_iso $(( now - 3489 )))","event":"pull_request"}
+]}
 JSON
+      ;;
+    2)
+      cat <<JSON
+{"workflow_runs":[
+ {"id":9320,"name":"Terraform","head_branch":"main","status":"queued","conclusion":null,"display_title":"Rotate the staging database credentials","created_at":"$(_iso $(( now - 20 )))","run_started_at":"$(_iso $(( now - 20 )))","updated_at":"$(_iso $(( now - 20 )))","event":"workflow_dispatch"},
+ {"id":9321,"name":"Terraform","head_branch":"main","status":"completed","conclusion":"success","display_title":"Pin the runner image to 24.04","created_at":"$(_iso $(( now - 2400 )))","run_started_at":"$(_iso $(( now - 2400 )))","updated_at":"$(_iso $(( now - 2075 )))","event":"push"},
+ {"id":9322,"name":"Nightly","head_branch":"main","status":"completed","conclusion":"failure","display_title":"Nightly drift check found 3 unmanaged resources","created_at":"$(_iso $(( now - 21600 )))","run_started_at":"$(_iso $(( now - 21600 )))","updated_at":"$(_iso $(( now - 21360 )))","event":"schedule"}
+]}
+JSON
+      ;;
+    *)
+      if (( cyc < 25 )); then rstatus='"in_progress"'; rconcl=null; rcreated="$(_iso $(( now - cyc )))"; rupd="\"$rcreated\""
+      else rstatus='"completed"'; rconcl='"success"'; rcreated="$(_iso $(( now - cyc )))"; rupd="\"$(_iso $(( now - cyc + 22 )))\""; fi
+      cat <<JSON
+{"workflow_runs":[
+ {"id":901,"name":"Deploy","head_branch":"develop","status":$rstatus,"conclusion":$rconcl,"display_title":"Production deploy (demo)","created_at":"$rcreated","run_started_at":"$rcreated","updated_at":$rupd,"event":"workflow_run"},
+ {"id":902,"name":"CI","head_branch":"develop","status":"completed","conclusion":"success","display_title":"Make the runs table responsive at any width","created_at":"$(_iso $(( now - 300 )))","run_started_at":"$(_iso $(( now - 300 )))","updated_at":"$(_iso $(( now - 52 )))","event":"push"},
+ {"id":903,"name":"CI","head_branch":"fix-flaky-test","status":"completed","conclusion":"failure","display_title":"Try to fix the flaky integration test again","created_at":"$(_iso $(( now - 1800 )))","run_started_at":"$(_iso $(( now - 1800 )))","updated_at":"$(_iso $(( now - 1705 )))","event":"pull_request"},
+ {"id":904,"name":"Lint","head_branch":"chore/bump-deps","status":"queued","conclusion":null,"display_title":"Bump dependencies to latest","created_at":"$(_iso $(( now - 40 )))","run_started_at":"$(_iso $(( now - 40 )))","updated_at":"$(_iso $(( now - 40 )))","event":"pull_request"},
+ {"id":905,"name":"Release","head_branch":"機能/検索ページ","status":"completed","conclusion":"success","display_title":"🚀 Ship the release pipeline","created_at":"$(_iso $(( now - 7200 )))","run_started_at":"$(_iso $(( now - 7200 )))","updated_at":"$(_iso $(( now - 7010 )))","event":"release"},
+ {"id":906,"name":"CI","head_branch":"hotfix/queue-worker","status":"completed","conclusion":"failure","display_title":"⚠️ Retry storm in the queue worker after the 日次 deploy","created_at":"$(_iso $(( now - 9000 )))","run_started_at":"$(_iso $(( now - 9000 )))","updated_at":"$(_iso $(( now - 8880 )))","event":"push"},
+ {"id":907,"name":"Integration","head_branch":"experiment/very-long-branch-name-that-overflows","status":"completed","conclusion":"cancelled","display_title":"Rewrite the fixture harness so that every column, at every terminal width, pads to exactly the layout width the header rule uses","created_at":"$(_iso $(( now - 14400 )))","run_started_at":"$(_iso $(( now - 14400 )))","updated_at":"$(_iso $(( now - 13980 )))","event":"workflow_dispatch"}
+]}
+JSON
+      ;;
+  esac
 }
 
 # ── Response cache ─────────────────────────────────────────────────────────
 # Live/picker frames render from this cache instantly (no flicker/wipe) while the
-# actual `gh` fetch runs in the BACKGROUND on a longer interval ($GHA_POLL). The
+# actual fetch runs in the BACKGROUND on a longer interval ($GHA_POLL). The
 # ticking timers are computed locally each frame, so they never need the network.
+# One entry per repo, so a repo list costs one cache file per repo and each is
+# refreshed independently.
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/gha"
 cache_file() { printf '%s/%s.json' "$CACHE_DIR" "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"; }
 cache_age()  { local m; m=$(file_mtime "$1"); echo $(( $(date +%s) - m )); }
+# repo_cache_file REPO — cache path for one repo under the current scope. The v2
+# prefix busts entries written when this fetched through `gh run list`, whose
+# JSON had different field names.
+repo_cache_file() { cache_file "v2|${1}|${all}|${branch}|${limit}"; }
 # unstick_lock DIR — both refresh paths lock with mkdir, which a killed job
 # leaves behind forever; drop one that's too old to belong to a live fetch.
 unstick_lock() {
@@ -444,54 +544,187 @@ prune_cache() {
   : > "$stamp" 2>/dev/null || true
   find "$CACHE_DIR" -maxdepth 1 -type f \( -name '*.json' -o -name 'prev-*.txt' \) \
        -mtime +7 -delete 2>/dev/null || true
-  find "$CACHE_DIR" -maxdepth 1 -type f \( -name '*.tmp' -o -name '*.bg' \) \
-       -mtime +1 -delete 2>/dev/null || true
+  find "$CACHE_DIR" -maxdepth 1 -type f \( -name '*.etag' -o -name '*.warn' \) \
+       -mtime +7 -delete 2>/dev/null || true
+  find "$CACHE_DIR" -maxdepth 1 -type f \( -name '*.tmp' -o -name '*.raw' \
+       -o -name '*.body' -o -name '*.err' \) -mtime +1 -delete 2>/dev/null || true
   find "$CACHE_DIR" -maxdepth 1 -type d -name '*.lock' -mtime +1 \
        -exec rmdir {} + 2>/dev/null || true
   return 0
 }
 
-_fetch_sync() {                      # $1=cache file — fetch now, write atomically
-  local tmp="$1.$$.tmp" err="$1.$$.err" rc=0 msg
-  gh "${list_args[@]}" > "$tmp" 2>"$err" || rc=$?
-  if (( rc == 0 )); then mv -f "$tmp" "$1"; rm -f "$err"; return 0; fi
+# ── Conditional fetch ──────────────────────────────────────────────────────
+# The run list comes from `gh api repos/{owner}/{repo}/actions/runs` rather than
+# `gh run list`, for one reason: it lets us send If-None-Match. GitHub does not
+# charge a 304 against the primary rate limit, so an idle live view polling every
+# $GHA_POLL seconds costs essentially nothing, where the unconditional version
+# spent 600 requests/hour PER REPO and fell over on a list of eight.
+#
+# The price is parsing raw REST rather than gh's camelCase mapping: id,
+# head_branch, display_title, run_started_at, created_at, updated_at. The
+# normalising jq below is the single place that knows those names.
+
+# api_args REPO — `gh api` arguments for one repo's run list. -X GET is required
+# because -f alone flips gh to POST; with it, gh URL-encodes the values, which
+# matters for branch names carrying a slash or an ampersand.
+api_args() {
+  local a=(api -i -X GET "repos/$1/actions/runs" -f "per_page=$limit")
+  [[ -n "$branch" ]] && a+=(-f "branch=$branch")
+  printf '%s\n' "${a[@]}"
+}
+
+# _api_fetch REPO FILE — one conditional GET, written atomically.
+#   200  body replaces FILE, new ETag stored beside it
+#   304  FILE is untouched but its mtime is bumped, so the poll interval resets
+#   else FILE is left alone and a warning is queued in FILE.warn
+# Returns 0 when FILE holds usable data afterwards, 1 when it does not.
+#
+# `gh api` exits NON-ZERO on any non-2xx, and that includes the 304 this whole
+# design is built on ("gh: HTTP 304" on stderr, exit 1). So the status line from
+# -i is read first and the exit code is only consulted afterwards; treating a
+# non-zero exit as failure would turn every cache hit into a fetch error.
+_api_fetch() {
+  local r="$1" f="$2" ef="$2.etag" wf="$2.warn"
+  local raw="$2.$$.raw" body="$2.$$.body" err="$2.$$.err"
+  local et="" rc=0 st="" newet="" msg line
+  local args=(); while IFS= read -r line; do args+=("$line"); done < <(api_args "$r")
+  # Only revalidate when there is something to revalidate against: an ETag with
+  # no cached body would turn a 304 into no data at all.
+  if [[ -s "$f" && -s "$ef" ]]; then
+    et="$(cat "$ef" 2>/dev/null || true)"
+    [[ -n "$et" ]] && args+=(-H "If-None-Match: $et")
+  fi
+  rm -f "$wf"
+  gh "${args[@]}" > "$raw" 2>"$err" || rc=$?
+
+  # One pass over the response: status line and ETag out on stdout, body to its
+  # own file. HTTP/2 lower-cases header names, so match the key case-folded.
+  IFS=$'\t' read -r st newet < <(tr -d '\r' < "$raw" 2>/dev/null | awk -v out="$body" '
+    NR == 1        { split($0, a, " "); status = a[2]; next }
+    body_started   { print > out; next }
+    /^[ \t]*$/     { body_started = 1; next }
+    {
+      key = tolower(substr($0, 1, index($0, ":") - 1))
+      if (key == "etag") { et = substr($0, index($0, ":") + 1); sub(/^[ \t]+/, "", et) }
+      next
+    }
+    END { printf "%s\t%s\n", status, et }')
+
+  case "$st" in
+    304) rm -f "$raw" "$err" "$body"
+         # Bump both: prune_cache ages them out together, and an ETag pruned out
+         # from under a live cache file would cost a full response to rebuild.
+         touch "$f" "$ef" 2>/dev/null || true; return 0 ;;
+    200) if (( rc == 0 )) && [[ -s "$body" ]]; then
+           mv -f "$body" "$f"
+           [[ -n "$newet" ]] && printf '%s' "$newet" > "$ef" 2>/dev/null || true
+           rm -f "$raw" "$err"
+           return 0
+         fi ;;
+  esac
+
   # A bad token, a missing repo and a dropped network used to be written out as
   # `[]`, i.e. reported as "No runs found" with exit 0. Pass gh's own words on.
-  rm -f "$tmp"
-  msg="$(grep -v '^[[:space:]]*$' "$err" 2>/dev/null | head -3 | tr '\n' ' ')"; rm -f "$err"
-  msg="${msg:-gh run list failed}"
-  if [[ -f "$1" ]]; then                  # stale data beats no data; still warn
-    printf 'gha: %s\ngha: showing cached results\n' "$msg" >&2; return 0
+  msg="$(grep -v '^[[:space:]]*$' "$err" 2>/dev/null | head -2 | tr '\n' ' ')"
+  msg="${msg%"${msg##*[![:space:]]}"}"          # drop the join's trailing space
+  msg="${msg:-run list failed (HTTP ${st:-?})}"
+  rm -f "$raw" "$err" "$body"
+  if [[ -s "$f" ]]; then
+    printf 'gha: %s: %s\ngha: %s: showing cached results\n' "$r" "$msg" "$r" > "$wf"
+    return 0                                    # stale data beats no data
   fi
-  printf 'gha: %s\n' "$msg" >&2; return 1
+  printf 'gha: %s: %s\n' "$r" "$msg" > "$wf"
+  return 1
 }
-_refresh_bg() {                      # $1=cache file — fetch in background, lock-guarded
-  local lock="$1.lock"
+
+# _refresh_bg REPO FILE — same fetch, detached and lock-guarded, for live frames.
+_refresh_bg() {
+  local lock="$2.lock"
   unstick_lock "$lock"
   if mkdir "$lock" 2>/dev/null; then
-    ( gh "${list_args[@]}" > "$1.bg" 2>/dev/null && mv -f "$1.bg" "$1"; rmdir "$lock" 2>/dev/null || true ) &
+    ( _api_fetch "$1" "$2" >/dev/null 2>&1; rmdir "$lock" 2>/dev/null || true ) &
     disown 2>/dev/null || true
   fi
 }
 
-# fetch_runs — run JSON: from cache when live ($GHA_CACHED: instant + background
-# refresh), fresh otherwise. $GHA_DEMO short-circuits to synthetic data.
-fetch_runs() {
-  [[ -n "${GHA_DEMO:-}" ]] && { demo_json; return; }
-  mkdir -p "$CACHE_DIR" 2>/dev/null || true
-  prune_cache
-  local file ttl age
-  file="$(cache_file "${repo}|${all}|${branch}|${limit}|${failed_only}")"
-  ttl="${GHA_POLL:-6}"
-  if [[ -n "${GHA_CACHED:-}" ]]; then
-    [[ -f "$file" ]] || _fetch_sync "$file" || return 1   # cold start: one sync fetch
-    age=$(cache_age "$file"); if (( age >= ttl )); then _refresh_bg "$file"; fi
-    cat "$file" 2>/dev/null || printf '[]'
-  else
-    if [[ -f "$file" ]]; then age=$(cache_age "$file"); else age=999; fi
-    if (( age < 3 )); then cat "$file"                 # dedupe rapid manual repeats
-    else _fetch_sync "$file" || return 1; cat "$file" 2>/dev/null || printf '[]'; fi
+# _drain_warnings — print whatever the (possibly parallel) fetches queued.
+_drain_warnings() {
+  local r w
+  for r in "${repos[@]}"; do
+    w="$(repo_cache_file "$r").warn"
+    [[ -f "$w" ]] && { cat "$w" >&2; rm -f "$w"; }
+  done
+  return 0
+}
+
+# MERGE_JQ — every repo's raw response in, one recency-sorted array of normalised
+# records out. This is the only place that knows REST's field names.
+# `started` keeps run_started_at with a created_at fallback, which is what the
+# duration column measures; `created` stays separate because a queued run's age
+# is measured from when it was created, not from when it started.
+# shellcheck disable=SC2016  # $r and $lim are jq variables, not shell ones
+MERGE_JQ='
+[ .[]
+  | .repo as $r
+  | ((.body.workflow_runs // [])[])
+  | { repo:       $r,
+      id:         (.id | tostring),
+      name:       (if ((.name // "") | length) == 0 then "—" else .name end),
+      branch:     (.head_branch // ""),
+      status:     (.status // ""),
+      conclusion: (.conclusion // ""),
+      title:      (.display_title // .name // ""),
+      started:    (.run_started_at // .created_at // ""),
+      created:    (.created_at // ""),
+      updated:    (.updated_at // ""),
+      event:      (.event // "") } ]
+| sort_by(.created) | reverse | .[0:$lim]'
+
+# _emit_bodies — each repo'"'"'s cached response tagged with the repo it came from,
+# one JSON object per line, ready for `jq -s`.
+_emit_bodies() {
+  local r f i=0
+  for r in "${repos[@]}"; do
+    printf '{"repo":"%s","body":' "$r"
+    if [[ -n "${GHA_DEMO:-}" ]]; then demo_json "$i"
+    else f="$(repo_cache_file "$r")"; if [[ -s "$f" ]]; then cat "$f"; else printf 'null'; fi
+    fi
+    printf '}\n'
+    i=$(( i + 1 ))
+  done
+}
+
+# collect_runs — the merged, normalised, recency-sorted run list for every repo
+# in scope. Repos are fetched CONCURRENTLY: serially, a list of eight would stall
+# the live view for eight round trips per frame.
+collect_runs() {
+  if [[ -z "${GHA_DEMO:-}" ]]; then
+    mkdir -p "$CACHE_DIR" 2>/dev/null || true
+    prune_cache
+    local ttl="${GHA_POLL:-6}" r f age pids=() p usable=0
+    for r in "${repos[@]}"; do
+      f="$(repo_cache_file "$r")"
+      if [[ -n "${GHA_CACHED:-}" ]]; then
+        # Live/picker: serve what is on disk now, refresh behind it. Only a cold
+        # cache blocks, and then every repo blocks at once rather than in turn.
+        if [[ -s "$f" ]]; then
+          age=$(cache_age "$f"); (( age >= ttl )) && _refresh_bg "$r" "$f"
+        else
+          _api_fetch "$r" "$f" >/dev/null 2>&1 & pids+=($!)
+        fi
+      else
+        if [[ -s "$f" ]] && (( $(cache_age "$f") < 3 )); then continue; fi  # rapid repeats
+        _api_fetch "$r" "$f" >/dev/null 2>&1 & pids+=($!)
+      fi
+    done
+    for p in ${pids[@]+"${pids[@]}"}; do wait "$p" || true; done
+    _drain_warnings
+    for r in "${repos[@]}"; do
+      [[ -s "$(repo_cache_file "$r")" ]] && usable=$(( usable + 1 ))
+    done
+    (( usable > 0 )) || return 1
   fi
+  _emit_bodies | jq -s --argjson lim "$limit" "$MERGE_JQ"
 }
 
 # ev_abbr EVENT — compact label for the trigger event.
@@ -519,61 +752,27 @@ notify() {
 # ── Modes that short-circuit before the run list ───────────────────────────
 
 # Open the real Actions page in a browser.
+# There is no Actions page that spans repos, so a list opens one tab per repo.
 if $web; then
-  url="$actions_url"
-  [[ "$all" == false && -n "$branch" ]] && url+="?query=branch%3A${branch}"
-  open_url "$url"; exit $?
-fi
-
-# Watch the most recent run for the resolved scope; optionally notify on finish.
-if $watch; then
-  if [[ -n "$watch_id" ]]; then
-    id="$watch_id"
-  else
-    args=(run list "${repo_args[@]}" --limit 1 --json databaseId)
-    [[ -n "$branch" ]] && args+=(--branch "$branch")
-    id="$(gh "${args[@]}" --jq '.[0].databaseId' 2>/dev/null || true)"
-  fi
-  if [[ -z "$id" ]]; then echo "gha: no runs found" >&2; exit 1; fi
-  run_url="https://github.com/${repo}/actions/runs/${id}"
-  if ! $notify; then
-    # -w: foreground live view (blocks until the run finishes).
-    exec gh run watch "${repo_args[@]}" "$id" --exit-status
-  fi
-  # -N: detach and watch in the BACKGROUND so the shell returns immediately; a
-  # native banner fires when the run finishes. The watcher is a child of this
-  # (exiting) process — not the user's shell — so there's no job-control noise;
-  # `trap '' HUP` keeps it alive if the terminal is later closed.
-  IFS=$'\t' read -r wfname wbranch < <(gh run view "$id" "${repo_args[@]}" \
-    --json workflowName,headBranch --jq '[.workflowName,.headBranch]|@tsv' 2>/dev/null)
-  # Record a watch marker synchronously so a picker reload shows it immediately;
-  # the background watcher removes it when the run finishes.
-  mkdir -p "$CACHE_DIR/watching" 2>/dev/null || true
-  printf '%s\t%s' "${wfname:-run}" "${wbranch:-}" > "$CACHE_DIR/watching/$id" 2>/dev/null || true
-  ( trap '' HUP INT
-    gh run watch "${repo_args[@]}" "$id" >/dev/null 2>&1 || true
-    IFS=$'\t' read -r cc wf hb cs cu < <(gh run view "$id" "${repo_args[@]}" \
-      --json conclusion,workflowName,headBranch,createdAt,updatedAt \
-      --jq '[.conclusion,.workflowName,.headBranch,.createdAt,.updatedAt]|@tsv' 2>/dev/null)
-    ran=""; [[ -n "$cs" && -n "$cu" ]] && ran=" in $(dur "$cs" "$cu")"
-    rm -f "$CACHE_DIR/watching/$id" 2>/dev/null || true
-    case "$cc" in
-      success) notify "${I_OK} ${wf:-run} passed${ran}"       "${repo} ${SEP} ${hb:-?}" "$run_url" ;;
-      *)       notify "${I_BAD} ${wf:-run} ${cc:-failed}${ran}" "${repo} ${SEP} ${hb:-?}" "$run_url" ;;
-    esac
-  ) >/dev/null 2>&1 &
-  disown 2>/dev/null || true
-  what="$(hlink "$run_url" "${Y}${wfname:-run} #${id}${X}")"
-  echo "${I_WAIT} watching ${what} ${D}${SEP} ${wbranch:-${ELL}}${X}"
-  echo "${D}   background ${DASH} you'll get a notification when it finishes  (\`gha -w\` to watch it live)${X}"
+  opened=0
+  for wr in "${repos[@]}"; do
+    url="https://github.com/${wr}/actions"
+    [[ "$all" == false && -n "$branch" ]] && url+="?query=branch%3A${branch}"
+    open_url "$url" || exit $?
+    opened=$(( opened + 1 ))
+  done
+  $multi && echo "${D}opened ${opened} Actions pages${X}"
   exit 0
 fi
 
-# PR checks for the current branch's open PR.
+# PR checks for the current branch's open PR. Always THIS directory's repo: the
+# question "what is failing on my PR" has no meaning across a list.
 if [[ "$mode" == pr ]]; then
+  prrepo="$(local_repo)"; [[ -z "$prrepo" ]] && prrepo="$repo"
+  repo_args=(-R "$prrepo")
   pj="$(gh pr view "${repo_args[@]}" --json number,title,url,state,headRefName 2>/dev/null || true)"
   if [[ -z "$pj" ]]; then
-    echo "${D}No open PR found for the current branch on ${repo}.${X}"; exit 0
+    echo "${D}No open PR found for the current branch on ${prrepo}.${X}"; exit 0
   fi
   # shellcheck disable=SC2034  # prstate is read to consume the field, not used
   IFS=$'\t' read -r prnum prtitle prurl prstate < <(echo "$pj" | jq -r '[(.number|tostring),.title,.url,.state]|@tsv')
@@ -631,15 +830,23 @@ fi
 # summary of any runs currently being background-watched (Ctrl-W).
 if [[ "$mode" == watchheader ]]; then
   # Line 1: live timers for any in-progress runs (recomputed each call so they tick).
-  if [[ -n "${GHA_DEMO:-}" ]]; then hjson="$(demo_json)"
-  else file="$(cache_file "${repo}|${all}|${branch}|${limit}|${failed_only}")"; hjson="$(cat "$file" 2>/dev/null || echo '[]')"; fi
+  # Cache-only: this is re-run every second by the live ticker, so it must never
+  # block on the network. collect_runs still schedules a background refresh when
+  # the entry goes stale, on the same $GHA_POLL cadence as the list reload.
+  export GHA_CACHED=1
+  hjson="$(collect_runs 2>/dev/null || printf '[]')"
   runline=""
   while IFS=$'\x1f' read -r rn rc; do
     [[ -z "$rc" ]] && continue
     runline+="${runline:+   }${I_RUN} ${rn:-run} $(live_elapsed "$rc")"
-  done < <(printf '%s' "$hjson" | jq -r '.[] | select(.status=="in_progress") | [(.name//"run"),.createdAt] | join("\u001f")' 2>/dev/null)
+  done < <(printf '%s' "$hjson" | jq -r '.[] | select(.status=="in_progress") | [.name,.started] | join("\u001f")' 2>/dev/null)
   [[ -n "$runline" ]] && printf '%s\n' "$runline"
-  printf 'state %s took %s when %s workflow %s branch %s title\n' "$SEP" "$SEP" "$SEP" "$SEP" "$SEP"
+  if $multi; then
+    printf 'state %s took %s when %s repo %s workflow %s branch %s title\n' \
+      "$SEP" "$SEP" "$SEP" "$SEP" "$SEP" "$SEP"
+  else
+    printf 'state %s took %s when %s workflow %s branch %s title\n' "$SEP" "$SEP" "$SEP" "$SEP" "$SEP"
+  fi
   printf '%s open   ^L logs   ^R rerun   ^W watch(bg)   ^P panel   esc quit' "$ENTER"
   wd="$CACHE_DIR/watching"
   if [[ -d "$wd" ]]; then
@@ -680,7 +887,11 @@ if $live && ! $interactive; then
     # never shows a half-cleared/half-drawn list (no flicker on refresh).
     # Re-read the width every frame so resizing the window reflows the table.
     w="${GHA_WIDTH:-$(stty size </dev/tty 2>/dev/null | awk '{print $2}')}"
-    frame="$(GHA_REPO="$repo" GHA_WIDTH="$w" "$0" "${sub[@]}" 2>/dev/null || true)"
+    if $multi; then
+      frame="$(env -u GHA_REPO GHA_REPOS="${repos[*]}" GHA_WIDTH="$w" "$0" "${sub[@]}" 2>/dev/null || true)"
+    else
+      frame="$(env -u GHA_REPOS GHA_REPO="$repo" GHA_WIDTH="$w" "$0" "${sub[@]}" 2>/dev/null || true)"
+    fi
     footer="${G}${I_RUN}${X} ${D}live ${SEP} every ${interval}s ${SEP} $(date "+%H:%M:%S") ${SEP} Ctrl-C to stop${X}"
     printf '\e[H%s\n%s\e[J' "$frame" "$footer"
     sleep "$interval"
@@ -688,27 +899,74 @@ if $live && ! $interactive; then
 fi
 
 # ── Fetch ──────────────────────────────────────────────────────────────────
-# shellcheck disable=SC2054  # --json takes ONE comma-separated field list
-list_args=(run list "${repo_args[@]}" --limit "$limit"
-  --json databaseId,name,headBranch,status,conclusion,displayTitle,createdAt,updatedAt,event)
-[[ -n "$branch" ]] && list_args+=(--branch "$branch")
+if [[ -n "$watch_id" ]]; then
+  json='[]'                     # picker Ctrl-W: the run is already identified
+else
+  json="$(collect_runs)"
 
-json="$(fetch_runs)"
+  # -f shows only failed/cancelled runs. Narrow the JSON itself rather than
+  # skipping rows further down, so the summary counts, the "no runs" message and
+  # the table all describe the same set of runs instead of the summary describing
+  # every run fetched.
+  if $failed_only; then
+    json="$(printf '%s' "$json" | jq -c '[ .[] | select((.conclusion // "") |
+      IN("failure","cancelled","timed_out","startup_failure","action_required")) ]')"
+  fi
 
-# -f shows only failed/cancelled runs. Narrow the JSON itself rather than
-# skipping rows further down, so the summary counts, the "no runs" message and
-# the table all describe the same set of runs instead of the summary describing
-# every run fetched.
-if $failed_only; then
-  json="$(printf '%s' "$json" | jq -c '[ .[] | select((.conclusion // "") |
-    IN("failure","cancelled","timed_out","startup_failure","action_required")) ]')"
+  if [[ -z "$json" || "$json" == "[]" ]]; then
+    if $watch; then echo "gha: no runs found" >&2; exit 1; fi
+    # shellcheck disable=SC2016  # the quotes around $branch are literal, for the reader
+    $emit_lines || echo "${D}No runs found${X}${branch:+ for branch '$branch'}."
+    exit 0
+  fi
 fi
 
-if [[ -z "$json" || "$json" == "[]" ]]; then
-  # shellcheck disable=SC2016  # the quotes around $branch are literal, for the reader
-  $emit_lines || echo "${D}No runs found${X}${branch:+ for branch '$branch'}."
+# Watch the most recent run in scope; optionally notify on finish. Across a repo
+# list "most recent" is the newest run of the merged table, so this reads the
+# fetch above rather than issuing a list call of its own.
+if $watch; then
+  if [[ -n "$watch_id" ]]; then
+    id="$watch_id"; wrepo="$repo"
+  else
+    IFS=$'\x1f' read -r id wrepo < <(printf '%s' "$json" \
+      | jq -r '.[0] | [.id,.repo] | join("\u001f")' 2>/dev/null)
+  fi
+  if [[ -z "$id" ]]; then echo "gha: no runs found" >&2; exit 1; fi
+  repo_args=(-R "$wrepo")
+  run_url="https://github.com/${wrepo}/actions/runs/${id}"
+  if ! $notify; then
+    # -w: foreground live view (blocks until the run finishes).
+    exec gh run watch "${repo_args[@]}" "$id" --exit-status
+  fi
+  # -N: detach and watch in the BACKGROUND so the shell returns immediately; a
+  # native banner fires when the run finishes. The watcher is a child of this
+  # (exiting) process — not the user's shell — so there's no job-control noise;
+  # `trap '' HUP` keeps it alive if the terminal is later closed.
+  IFS=$'\t' read -r wfname wbranch < <(gh run view "$id" "${repo_args[@]}" \
+    --json workflowName,headBranch --jq '[.workflowName,.headBranch]|@tsv' 2>/dev/null)
+  # Record a watch marker synchronously so a picker reload shows it immediately;
+  # the background watcher removes it when the run finishes.
+  mkdir -p "$CACHE_DIR/watching" 2>/dev/null || true
+  printf '%s\t%s\t%s' "${wfname:-run}" "${wbranch:-}" "$wrepo" > "$CACHE_DIR/watching/$id" 2>/dev/null || true
+  ( trap '' HUP INT
+    gh run watch "${repo_args[@]}" "$id" >/dev/null 2>&1 || true
+    IFS=$'\t' read -r cc wf hb cs cu < <(gh run view "$id" "${repo_args[@]}" \
+      --json conclusion,workflowName,headBranch,createdAt,updatedAt \
+      --jq '[.conclusion,.workflowName,.headBranch,.createdAt,.updatedAt]|@tsv' 2>/dev/null)
+    ran=""; [[ -n "$cs" && -n "$cu" ]] && ran=" in $(dur "$cs" "$cu")"
+    rm -f "$CACHE_DIR/watching/$id" 2>/dev/null || true
+    case "$cc" in
+      success) notify "${I_OK} ${wf:-run} passed${ran}"       "${wrepo} ${SEP} ${hb:-?}" "$run_url" ;;
+      *)       notify "${I_BAD} ${wf:-run} ${cc:-failed}${ran}" "${wrepo} ${SEP} ${hb:-?}" "$run_url" ;;
+    esac
+  ) >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  what="$(hlink "$run_url" "${Y}${wfname:-run} #${id}${X}")"
+  echo "${I_WAIT} watching ${what} ${D}${SEP} ${wbranch:-${ELL}}${X}"
+  echo "${D}   background ${DASH} you'll get a notification when it finishes  (\`gha -w\` to watch it live)${X}"
   exit 0
 fi
+
 
 # ── Interactive picker (fzf) ───────────────────────────────────────────────
 # The list is produced by re-invoking this script in --fzf-lines mode, so fzf can
@@ -722,12 +980,20 @@ if $interactive && ! $emit_lines; then
   if [[ -n "${GHA_DEMO:-}" && -z "${GHA_DEMO_START:-}" ]]; then
     GHA_DEMO_START="$(date -u +%s)"; export GHA_DEMO_START
   fi
-  env_pfx="GHA_REPO=${repo}"; $ascii && env_pfx+=" GHA_ASCII=1"
-  [[ -n "${GHA_DEMO:-}" ]] && env_pfx+=" GHA_DEMO=1${GHA_DEMO_START:+ GHA_DEMO_START=${GHA_DEMO_START}}"
+  # Two prefixes. Children that render the LIST inherit the whole scope; children
+  # that act on one ROW (preview, Ctrl-W) take that row's repo from field 2,
+  # which fzf shell-quotes for us and repo_ok has already restricted to
+  # owner/repo. Field 1 is the run id, field 2 the repo, both hidden by
+  # --with-nth=3.. and reachable from the binds as {1} and {2}.
+  aux_pfx=""; $ascii && aux_pfx+=" GHA_ASCII=1"
+  [[ -n "${GHA_DEMO:-}" ]] && aux_pfx+=" GHA_DEMO=1${GHA_DEMO_START:+ GHA_DEMO_START=${GHA_DEMO_START}}"
+  if $multi; then scope_pfx="GHA_REPOS='${repos[*]}'"; else scope_pfx="GHA_REPO=${repo}"; fi
+  env_pfx="${scope_pfx}${aux_pfx}"
+  row_pfx="GHA_REPO={2}${aux_pfx}"
   lines_cmd="${env_pfx} GHA_CACHED=1 ${0} --fzf-lines -n ${limit}"
   $failed_only && lines_cmd+=" -f"
   { ! $all && [[ -n "$branch" ]]; } && lines_cmd+=" ${branch}"
-  preview="${env_pfx} ${0} --preview-run {1}"           # cached preview → no flicker
+  preview="${row_pfx} ${0} --preview-run {1}"           # cached preview → no flicker
   hdr_env="${env_pfx}"; $live && hdr_env+=" GHA_LIVE=1"
   hdr_cmd="${hdr_env} ${0} --watch-header"
   # `load` fires after each (re)load: refresh the header (watch summary), and when
@@ -765,21 +1031,21 @@ if $interactive && ! $emit_lines; then
 
   fzf_ascii=(); $ascii && fzf_ascii=(--no-unicode)
   fzf < /dev/null \
-    --ansi --delimiter=$'\t' --with-nth=2.. \
+    --ansi --delimiter=$'\t' --with-nth=3.. \
     ${fzf_ascii[@]+"${fzf_ascii[@]}"} \
     --layout=reverse --border=rounded --info=inline --height=100% --cycle --scroll-off=3 \
-    --prompt="${repo} ${PTR} " --pointer="$PICK" --border-label=" gha ${SEP} ${repo} " \
+    --prompt="${scope_label} ${PTR} " --pointer="$PICK" --border-label=" gha ${SEP} ${scope_label} " \
     --header="${ENTER} open   ^L logs   ^R rerun   ^W watch(bg)   ^P panel   esc quit" \
     --preview="$preview" --preview-label=' run detail ' \
     --preview-window='right,52%,border-left,wrap,<100(down,60%,border-top,wrap)' \
     ${extra[@]+"${extra[@]}"} \
     --bind="start:${start_act}" \
     --bind="load:${load_act}" \
-    --bind="enter:execute-silent(gh run view {1} -R ${repo} --web)" \
-    --bind="ctrl-l:execute(gh run view {1} -R ${repo} --log-failed 2>&1 | less -R)" \
-    --bind="ctrl-r:execute(gh run rerun {1} -R ${repo} --failed 2>&1 | less -R)" \
-    --bind="ctrl-w:execute-silent(${env_pfx} ${0} --watch-id {1})+reload-sync(${lines_cmd})+transform-header(${hdr_cmd})+bell" \
-    --bind="ctrl-o:execute-silent(gh run view {1} -R ${repo} --web)" \
+    --bind="enter:execute-silent(gh run view {1} -R {2} --web)" \
+    --bind="ctrl-l:execute(gh run view {1} -R {2} --log-failed 2>&1 | less -R)" \
+    --bind="ctrl-r:execute(gh run rerun {1} -R {2} --failed 2>&1 | less -R)" \
+    --bind="ctrl-w:execute-silent(${row_pfx} ${0} --watch-id {1})+reload-sync(${lines_cmd})+transform-header(${hdr_cmd})+bell" \
+    --bind="ctrl-o:execute-silent(gh run view {1} -R {2} --web)" \
     --bind="ctrl-p:toggle-preview" \
     --bind="alt-w:change-preview-window(down,65%,border-top,wrap|hidden|right,52%,border-left,wrap)" \
     || true
@@ -796,9 +1062,10 @@ if ! $interactive; then
       (map(select(.status=="in_progress"))|length),
       (map(select(.status|IN("queued","waiting","requested","pending")))|length),
       (map(select(.conclusion=="cancelled"))|length),
-      ([.[].updatedAt]|max) // "-" ] | @tsv')
+      ([.[].updated]|max) // "-" ] | @tsv')
 
-  scope="$(hlink "$actions_url" "${B}${repo}${X}")"
+  if $multi; then scope="${B}${scope_label}${X}"
+  else scope="$(hlink "$actions_url" "${B}${repo}${X}")"; fi
   ! $all && scope+=" ${D}${DASH} ${branch}${X}"
   sum="${G}${I_OK} ${ok}${X}  ${R}${I_BAD} ${fail}${X}"
   (( run   > 0 )) && sum+="  ${Y}${I_RUN} ${run}${X}"
@@ -818,32 +1085,80 @@ if ! $interactive; then
   # the rule spans exactly the same width, so the divider matches the rows (no
   # overhang) and ultra-wide windows don't open a huge title→time void. Override
   # with GHA_MAXWIDTH; the responsive column choices below still use the real termw.
-  maxw="${GHA_MAXWIDTH:-100}"; loutw=$termw; (( loutw > maxw )) && loutw=$maxw
+  # A repo column adds ~20 columns of left cluster, so a list is given more room
+  # to lay out in before the cap bites; otherwise the title would be squeezed to
+  # nothing on exactly the windows wide enough to show every column.
+  maxw="${GHA_MAXWIDTH:-}"
+  if [[ -z "$maxw" ]]; then if $multi; then maxw=120; else maxw=100; fi; fi
+  loutw=$termw; (( loutw > maxw )) && loutw=$maxw
   rule=$(printf '%*s' "$loutw" ''); echo "${D}${rule// /$RULE}${X}"
 
-  # Responsive column plan. Layout is space-between: a left cluster (icon +
-  # workflow + branch + event), a flex title, and a right-pinned meta block
-  # (duration + age). Columns drop as the window narrows: event → workflow →
-  # branch. `Lw` is the visible width of the left cluster incl. gaps.
-  show_wf=1; show_ev=1; show_dur=1; show_br=1
+  # Responsive column plan. Layout is space-between: a left cluster (icon + repo
+  # + workflow + branch + event), a flex title, and a right-pinned meta block
+  # (duration + age). Columns drop as the window narrows.
+  #
+  # Single repo, unchanged: event → workflow → branch.
+  # A repo list drops REPO LAST — it is the column that says which repo a row
+  # belongs to, so a table that has dropped it is not a multi-repo table any
+  # more. Workflow and event pay for it instead, and only reappear on a window
+  # wide enough to carry both: event → workflow → branch → repo.
+  # `Lw` is the visible width of the left cluster incl. gaps.
+  show_wf=1; show_ev=1; show_dur=1; show_br=1; show_repo=0
+  $multi && show_repo=1
   $all || show_br=0
-  (( termw < 96 )) && show_ev=0
-  (( termw < 74 )) && show_wf=0
   (( termw < 68 )) && show_dur=0
   (( termw < 50 )) && show_br=0
+  if (( show_repo )); then
+    (( termw < 112 )) && show_ev=0
+    (( termw < 104 )) && show_wf=0
+    (( termw < 44 ))  && show_repo=0
+  else
+    (( termw < 96 )) && show_ev=0
+    (( termw < 74 )) && show_wf=0
+  fi
   wf_w=13; ev_w=5
   br_w=20; (( termw < 90 )) && br_w=16
-  Lw=1
-  (( show_wf )) && Lw=$(( Lw + 2 + wf_w ))
-  (( show_br )) && Lw=$(( Lw + 2 + br_w ))
-  (( show_ev )) && Lw=$(( Lw + 2 + ev_w ))
+  repo_w=18; (( termw < 96 )) && repo_w=16
+  recalc_Lw() {
+    Lw=1
+    (( show_repo )) && Lw=$(( Lw + 2 + repo_w ))
+    (( show_wf ))   && Lw=$(( Lw + 2 + wf_w ))
+    (( show_br ))   && Lw=$(( Lw + 2 + br_w ))
+    (( show_ev ))   && Lw=$(( Lw + 2 + ev_w ))
+    return 0
+  }
+  recalc_Lw
+
+  # Guard rail. The thresholds above are a PREFERENCE; this is the arithmetic.
+  # A row is 2 + left cluster + 2 + title + gap + meta, and the gap is clamped to
+  # a minimum of 1, so the row only lands exactly on loutw while
+  #   loutw >= 5 + Lw + title + meta.
+  # Keep dropping columns, in the same order, until that holds for the widest
+  # title and meta block a row can produce.
+  # Without this, adding a column (the repo one did exactly this at width 50)
+  # silently produces rows that overhang the rule — which the width invariant in
+  # tests/ then fails on, loudly, rather than shipping a crooked table.
+  MIN_TITLE=10                       # the floor `avail` clamps to below
+  while :; do
+    meta_max=7; (( show_dur )) && meta_max=16    # "queued 365d ago" is the widest
+    (( 5 + Lw + MIN_TITLE + meta_max <= loutw )) && break
+    if   (( show_ev ));   then show_ev=0
+    elif (( show_wf ));   then show_wf=0
+    elif (( show_dur ));  then show_dur=0
+    elif (( show_br ));   then show_br=0
+    elif (( show_repo )); then show_repo=0
+    else break
+    fi
+    recalc_Lw
+  done
 
   # Dim column-label row so the table reads without prior knowledge. Lists only
   # the columns actually shown at this width, left→right. Suppress with --bare or
   # GHA_NOHEADER=1 for the terse everyday view.
   if ! $bare && [[ -z "${GHA_NOHEADER:-}" ]]; then
     leg="state"
-    (( show_wf )) && leg+=" ${SEP} workflow"
+    (( show_repo )) && leg+=" ${SEP} repo"
+    (( show_wf ))   && leg+=" ${SEP} workflow"
     (( show_br )) && leg+=" ${SEP} branch"
     (( show_ev )) && leg+=" ${SEP} event"
     leg+=" ${SEP} title"
@@ -855,19 +1170,19 @@ fi
 
 # ── Rows ───────────────────────────────────────────────────────────────────
 # rows delimited by unit separator (\x1f) so empty fields don't collapse.
-while IFS=$'\x1f' read -r id name hbranch status conclusion title created updated event; do
+while IFS=$'\x1f' read -r rrepo id name hbranch status conclusion title started created updated event; do
   case "$status" in
     completed)
       case "$conclusion" in
-        success)                             icon="${G}${I_OK}${X}"; dur_p="$(dur "$created" "$updated")" ;;
-        failure|timed_out|startup_failure)   icon="${R}${I_BAD}${X}"; dur_p="$(dur "$created" "$updated")" ;;
-        cancelled)                           icon="${D}${I_CANCEL}${X}"; dur_p="$(dur "$created" "$updated")" ;;
+        success)                             icon="${G}${I_OK}${X}"; dur_p="$(dur "$started" "$updated")" ;;
+        failure|timed_out|startup_failure)   icon="${R}${I_BAD}${X}"; dur_p="$(dur "$started" "$updated")" ;;
+        cancelled)                           icon="${D}${I_CANCEL}${X}"; dur_p="$(dur "$started" "$updated")" ;;
         skipped)                             icon="${D}${I_SKIP}${X}"; dur_p="" ;;
         action_required)                     icon="${Y}!${X}"; dur_p="" ;;
         *)                                   icon="${D}?${X}"; dur_p="" ;;
       esac
       age_p="$(rel "$updated") ago"; metacol="" ;;
-    in_progress) icon="${Y}${I_RUN}${X}"; dur_p="$(live_elapsed "$created")"; age_p=""; metacol="$Y" ;;
+    in_progress) icon="${Y}${I_RUN}${X}"; dur_p="$(live_elapsed "$started")"; age_p=""; metacol="$Y" ;;
     queued|waiting|requested|pending) icon="${Y}${I_QUEUE}${X}"; dur_p="queued"; age_p="$(rel "$created") ago"; metacol="$Y" ;;
     *) icon="${D}?${X}"; dur_p="$status"; age_p=""; metacol="$D" ;;
   esac
@@ -888,22 +1203,30 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
     # Two time columns: duration (how long it took) + age (when it ran). A running
     # run shows its live ticking elapsed as the duration, with no age yet.
     case "$status" in
-      completed)   dcol="$(dur "$created" "$updated")"; acol="$(rel "$updated") ago" ;;
-      in_progress) dcol="$(live_elapsed "$created")";   acol="" ;;
+      completed)   dcol="$(dur "$started" "$updated")"; acol="$(rel "$updated") ago" ;;
+      in_progress) dcol="$(live_elapsed "$started")";   acol="" ;;
       *)           dcol="";                              acol="$(rel "$created") ago" ;;
     esac
     dcell "$hbranch" 14 "$ELL"; lbr="$D_S"
     dcell "$name" 8; lwf="$D_S"
+    rcell=""
+    if $multi; then dcell "$rrepo" 18 "$ELL"; rcell=" ${B}${D_S}${X}"; fi
     wmark=""; [[ -e "$CACHE_DIR/watching/$id" ]] && wmark=" ${M}${I_WATCH}${X}"   # being watched
-    printf -v disp '%b %b%6s%b %b%8s%b  %b%s%b %b%s%b %b%s%b%s' \
-      "$icon" "$C" "$dcol" "$X" "$D" "$acol" "$X" "$tint" "$lwf" "$X" "$brc" "$lbr" "$X" "$tint" "$title" "$X" "$wmark"
-    printf '%s\t%s\n' "$id" "$disp"      # --fzf-lines: one row per line for fzf
+    printf -v disp '%b %b%6s%b %b%8s%b %b %b%s%b %b%s%b %b%s%b%s' \
+      "$icon" "$C" "$dcol" "$X" "$D" "$acol" "$X" "$rcell" "$tint" "$lwf" "$X" "$brc" "$lbr" "$X" "$tint" "$title" "$X" "$wmark"
+    # Fields 1 and 2 (id, repo) are hidden by --with-nth=3.. and are what the
+    # binds act on, so every row carries the repo it actually came from.
+    printf '%s\t%s\t%s\n' "$id" "$rrepo" "$disp"
     continue
   fi
 
   # Build the left cluster (icon + visible columns), each padded to its width.
-  run_url="https://github.com/${repo}/actions/runs/${id}"
+  run_url="https://github.com/${rrepo}/actions/runs/${id}"
   left="$icon"
+  if (( show_repo )); then
+    dcell "$rrepo" "$repo_w" "$ELL"
+    left+="  $(hlink "https://github.com/${rrepo}/actions" "${B}${D_S}${X}")"
+  fi
   if (( show_wf )); then
     dcell "$name" "$wf_w"                     # hard cut: workflow names repeat
     left+="  $(hlink "$run_url" "${tint}${D_S}${X}")"
@@ -928,7 +1251,7 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
 
   # Flex title fills the gap; the meta block sits flush at the right edge of the
   # capped layout width (loutw), so times stay column-aligned without sprawling.
-  avail=$(( loutw - 2 - Lw - 3 - metalen )); (( avail < 10 )) && avail=10
+  avail=$(( loutw - 2 - Lw - 3 - metalen )); (( avail < MIN_TITLE )) && avail=$MIN_TITLE
   (( avail > 100 )) && avail=100
   dtrunc "$title" "$avail" "$ELL"; t="$D_S"; tw=$D_W
   tcell="$(hlink "$run_url" "${tint}${t}${X}")"
@@ -937,9 +1260,6 @@ while IFS=$'\x1f' read -r id name hbranch status conclusion title created update
   pad=$(( loutw - 2 - Lw - 2 - tw - metalen )); (( pad < 1 )) && pad=1
   printf -v gap '%*s' "$pad" ''
   printf '  %s  %s%s%s\n' "$left" "$tcell" "$gap" "$meta_col"
-done < <(echo "$json" | jq -r '
-  sort_by(.createdAt) | reverse | .[] |
-  [ (.databaseId|tostring),
-    (if (.name // "") == "" then "—" else .name end),
-    .headBranch, .status, (.conclusion // ""),
-    .displayTitle, .createdAt, .updatedAt, (.event // "") ] | join("\u001f")')
+done < <(echo "$json" | jq -r '.[] |
+  [ .repo, .id, .name, .branch, .status, .conclusion,
+    .title, .started, .created, .updated, .event ] | join("\u001f")')
