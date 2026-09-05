@@ -28,7 +28,12 @@ the two can disagree, which is the whole point of having them.
 
 **`render_test.sh`** renders `--demo` at widths 40, 50, 68, 74, 88, 96, 100 and
 120, in both the default and `--ascii` glyph modes, plus one `-f` and one
-`--bare` case. For each:
+`--bare` case; then the same again in **multi-repo mode** across three demo
+repos, at those widths plus 44, 104 and 112 — the three widths where the repo
+column's own thresholds sit (44 is the narrowest that still carries a repo
+column, 104 is where workflow reappears beside it, 112 where event does). The
+three demo repos are given runs timed to *interleave*, so a merged table is only
+correct if the recency sort across repos actually works. For each case:
 
 1. **Golden file** — byte-identical to `tests/fixtures/<case>.txt`.
 2. **The width invariant** — every data row is *exactly* as wide, in terminal
@@ -53,7 +58,8 @@ Renders are pinned with `GHA_NOW` (freezes every clock in the script, so
 relative ages never move), `GHA_DEMO_START` (fixes the phase of the demo's
 running→passed cycle), `GHA_WIDTH`, `GHA_REPO` and `NO_COLOR=1`. Each render
 runs under `env -i` so a developer's own `GHA_*` exports cannot leak into a
-fixture.
+fixture, and `GHA_REPOS_FILE` is pointed at a path that cannot exist so a real
+`~/.config/gha/repos` on the machine running the tests cannot either.
 
 `GHA_NOW` exists for the tests and nothing else; the live view deliberately does
 not set it, or the timers would stop ticking.
