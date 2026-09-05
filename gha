@@ -688,6 +688,15 @@ list_args=(run list "${repo_args[@]}" --limit "$limit"
 
 json="$(fetch_runs)"
 
+# -f shows only failed/cancelled runs. Narrow the JSON itself rather than
+# skipping rows further down, so the summary counts, the "no runs" message and
+# the table all describe the same set of runs instead of the summary describing
+# every run fetched.
+if $failed_only; then
+  json="$(printf '%s' "$json" | jq -c '[ .[] | select((.conclusion // "") |
+    IN("failure","cancelled","timed_out","startup_failure","action_required")) ]')"
+fi
+
 if [[ -z "$json" || "$json" == "[]" ]]; then
   $emit_lines || echo "${D}No runs found${X}${branch:+ for branch '$branch'}."
   exit 0
@@ -771,11 +780,12 @@ fi
 
 # ── Header + summary (skipped in interactive mode) ─────────────────────────
 if ! $interactive; then
-  read -r ok fail run queue latest < <(echo "$json" | jq -r '
+  read -r ok fail run queue canc latest < <(echo "$json" | jq -r '
     [ (map(select(.conclusion=="success"))|length),
       (map(select(.conclusion|IN("failure","timed_out","startup_failure")))|length),
       (map(select(.status=="in_progress"))|length),
       (map(select(.status|IN("queued","waiting","requested","pending")))|length),
+      (map(select(.conclusion=="cancelled"))|length),
       ([.[].updatedAt]|max) // "-" ] | @tsv')
 
   scope="$(hlink "$actions_url" "${B}${repo}${X}")"
@@ -783,6 +793,7 @@ if ! $interactive; then
   sum="${G}${I_OK} ${ok}${X}  ${R}${I_BAD} ${fail}${X}"
   (( run   > 0 )) && sum+="  ${Y}${I_RUN} ${run}${X}"
   (( queue > 0 )) && sum+="  ${Y}${I_QUEUE} ${queue}${X}"
+  (( canc  > 0 )) && sum+="  ${D}${I_CANCEL} ${canc}${X}"
   upd=""; [[ "$latest" != "-" ]] && upd="  ${D}${SEP} updated $(rel "$latest") ago${X}"
   echo "${scope}   ${sum}${upd}"
 
@@ -837,10 +848,6 @@ fzf_lines=()
 
 # rows delimited by unit separator (\x1f) so empty fields don't collapse.
 while IFS=$'\x1f' read -r id name hbranch status conclusion title created updated event; do
-  if $failed_only; then
-    case "$conclusion" in failure|cancelled|timed_out|startup_failure|action_required) ;; *) continue ;; esac
-  fi
-
   case "$status" in
     completed)
       case "$conclusion" in
