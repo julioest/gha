@@ -52,7 +52,7 @@ bare=false
 ascii=false
 
 # Subcommand: `gha pr` shows the current branch's PR checks.
-[[ "${1:-}" == "pr" ]] && { mode=pr; shift; }
+[[ "${1:-}" == "pr" ]] && { mode="pr"; shift; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -347,6 +347,7 @@ fi
 
 # hlink URL TEXT — wrap TEXT in an OSC 8 hyperlink (plain TEXT when unsupported).
 hlink() {
+  # shellcheck disable=SC1003  # the \\ is the ST that terminates an OSC 8 escape
   if $use_links; then printf '\e]8;;%s\e\\%s\e]8;;\e\\' "$1" "$2"
   else printf '%s' "$2"; fi
 }
@@ -574,6 +575,7 @@ if [[ "$mode" == pr ]]; then
   if [[ -z "$pj" ]]; then
     echo "${D}No open PR found for the current branch on ${repo}.${X}"; exit 0
   fi
+  # shellcheck disable=SC2034  # prstate is read to consume the field, not used
   IFS=$'\t' read -r prnum prtitle prurl prstate < <(echo "$pj" | jq -r '[(.number|tostring),.title,.url,.state]|@tsv')
   hdr="$(hlink "$prurl" "${B}PR #${prnum}${X}")  ${prtitle}"
   echo "$hdr"
@@ -582,6 +584,8 @@ if [[ "$mode" == pr ]]; then
   if [[ -z "$cj" || "$cj" == "[]" ]]; then
     echo "${D}No checks reported yet.${X}"; exit 0
   fi
+  # shellcheck disable=SC2034  # cwf consumes the workflow field, which the
+  # per-check line does not show; the PR header already names the workflow.
   echo "$cj" | jq -r '.[] | [.bucket,(.name//""),(.workflow//""),(.startedAt//""),(.completedAt//""),(.link//"")] | join("\u001f")' \
   | while IFS=$'\x1f' read -r bucket cname cwf cstart cend clink; do
       case "$bucket" in
@@ -663,7 +667,9 @@ if $live && ! $interactive; then
   export GHA_COLOR=1 GHA_LINKS=1
   $ascii && export GHA_ASCII=1
   # Fix a demo anchor once so child frames share it and the timer advances.
-  [[ -n "${GHA_DEMO:-}" && -z "${GHA_DEMO_START:-}" ]] && export GHA_DEMO_START="$(date -u +%s)"
+  if [[ -n "${GHA_DEMO:-}" && -z "${GHA_DEMO_START:-}" ]]; then
+    GHA_DEMO_START="$(date -u +%s)"; export GHA_DEMO_START
+  fi
   sub=(-n "$limit"); $failed_only && sub+=(-f)
   { ! $all && [[ -n "$branch" ]]; } && sub+=("$branch")
   cleanup() { printf '\e[?25h\n'; }             # restore cursor on exit
@@ -682,6 +688,7 @@ if $live && ! $interactive; then
 fi
 
 # ── Fetch ──────────────────────────────────────────────────────────────────
+# shellcheck disable=SC2054  # --json takes ONE comma-separated field list
 list_args=(run list "${repo_args[@]}" --limit "$limit"
   --json databaseId,name,headBranch,status,conclusion,displayTitle,createdAt,updatedAt,event)
 [[ -n "$branch" ]] && list_args+=(--branch "$branch")
@@ -698,6 +705,7 @@ if $failed_only; then
 fi
 
 if [[ -z "$json" || "$json" == "[]" ]]; then
+  # shellcheck disable=SC2016  # the quotes around $branch are literal, for the reader
   $emit_lines || echo "${D}No runs found${X}${branch:+ for branch '$branch'}."
   exit 0
 fi
@@ -711,7 +719,9 @@ if $interactive && ! $emit_lines; then
     exit 1
   fi
   poll="${GHA_POLL:-6}"
-  [[ -n "${GHA_DEMO:-}" && -z "${GHA_DEMO_START:-}" ]] && export GHA_DEMO_START="$(date -u +%s)"
+  if [[ -n "${GHA_DEMO:-}" && -z "${GHA_DEMO_START:-}" ]]; then
+    GHA_DEMO_START="$(date -u +%s)"; export GHA_DEMO_START
+  fi
   env_pfx="GHA_REPO=${repo}"; $ascii && env_pfx+=" GHA_ASCII=1"
   [[ -n "${GHA_DEMO:-}" ]] && env_pfx+=" GHA_DEMO=1${GHA_DEMO_START:+ GHA_DEMO_START=${GHA_DEMO_START}}"
   lines_cmd="${env_pfx} GHA_CACHED=1 ${0} --fzf-lines -n ${limit}"
@@ -844,8 +854,6 @@ if ! $interactive; then
 fi
 
 # ── Rows ───────────────────────────────────────────────────────────────────
-fzf_lines=()
-
 # rows delimited by unit separator (\x1f) so empty fields don't collapse.
 while IFS=$'\x1f' read -r id name hbranch status conclusion title created updated event; do
   case "$status" in
