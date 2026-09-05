@@ -40,49 +40,71 @@ utf8_locale() {
 }
 UTF8="$(utf8_locale)"
 
-# render LOCALE WIDTH ARGS... — one hermetic render. `env -i` keeps a developer's
-# GHA_* exports, NO_COLOR, COLUMNS and locale out of the fixtures; GHA_REPO is
-# pinned so the output does not depend on which checkout it ran in.
+# render LOCALE WIDTH ENV ARGS... — one hermetic render. `env -i` keeps a
+# developer's GHA_* exports, NO_COLOR, COLUMNS and locale out of the fixtures.
+# GHA_REPO is pinned so the output does not depend on which checkout it ran in,
+# and GHA_REPOS_FILE is pointed at a path that cannot exist so a real
+# ~/.config/gha/repos on the machine running the tests can never leak into a
+# fixture. ENV is a space-separated list of KEY=VALUE that overrides both --
+# multi-repo cases pass GHA_REPOS there (comma-separated, since the field itself
+# is split on spaces).
 render() {
-  local loc="$1" width="$2"; shift 2
+  local loc="$1" width="$2" extra="$3"; shift 3
+  # shellcheck disable=SC2086  # $extra is a deliberate word-split KEY=VALUE list
   env -i \
     PATH="$PATH" HOME="$HOME" TERM=dumb TZ=UTC LC_ALL="$loc" \
-    NO_COLOR=1 GHA_REPO=demo/repo \
+    NO_COLOR=1 GHA_REPO=demo/repo GHA_REPOS_FILE=/nonexistent/gha/repos \
     GHA_NOW="$NOW" GHA_DEMO_START="$DEMO_START" GHA_WIDTH="$width" \
+    $extra \
     bash "$GHA" --demo "$@" 2>&1
 }
+
+# The three demo repos a multi-repo case renders. demo_json gives each a
+# different set of runs, timed to interleave, so a merged table is only correct
+# if the recency sort across repos actually works.
+MULTI="GHA_REPO= GHA_REPOS=demo/api,demo/web-frontend,demo/infra"
 
 # The matrix: every width in both glyph modes, plus one case each for the two
 # render flags that change the table's shape rather than its width.
 WIDTHS="40 50 68 74 88 96 100 120"
 CASES=""
 for w in $WIDTHS; do
-  CASES+="w${w}|${w}|"$'\n'
-  CASES+="w${w}-ascii|${w}|--ascii"$'\n'
+  CASES+="w${w}|${w}||"$'\n'
+  CASES+="w${w}-ascii|${w}||--ascii"$'\n'
 done
-CASES+="failed-w88|88|-f"$'\n'
-CASES+="bare-w88|88|--bare"$'\n'
+CASES+="failed-w88|88||-f"$'\n'
+CASES+="bare-w88|88||--bare"$'\n'
+
+# Multi-repo. 44, 104 and 112 are in here alongside the single-repo widths
+# because they are where the repo column's own thresholds sit: 44 is the
+# narrowest width that still carries a repo column, 104 is where workflow
+# reappears beside it and 112 is where event does.
+for w in 40 44 50 68 74 88 96 100 104 112 120; do
+  CASES+="multi-w${w}|${w}|${MULTI}|"$'\n'
+done
+CASES+="multi-w88-ascii|88|${MULTI}|--ascii"$'\n'
+CASES+="multi-failed-w88|88|${MULTI}|-f"$'\n'
 
 if $UPDATE; then
   [[ -z "$UTF8" ]] && { echo "render_test: no UTF-8 locale available; refusing to write fixtures" >&2; exit 1; }
   mkdir -p "$FIXTURES"
   n=0
-  while IFS='|' read -r name width args; do
+  while IFS='|' read -r name width cenv args; do
     [[ -z "$name" ]] && continue
     # shellcheck disable=SC2086  # $args is a deliberate word-split flag list
-    render "$UTF8" "$width" $args > "$FIXTURES/$name.txt"
+    render "$UTF8" "$width" "$cenv" $args > "$FIXTURES/$name.txt"
     n=$(( n + 1 ))
   done <<< "$CASES"
   echo "render_test: wrote $n fixture(s) to tests/fixtures/"
   exit 0
 fi
 
-while IFS='|' read -r name width args; do
+while IFS='|' read -r name width cenv args; do
   [[ -z "$name" ]] && continue
   fixture="$FIXTURES/$name.txt"
 
   # shellcheck disable=SC2086
-  out="$(render "${UTF8:-C}" "$width" $args)"
+  out="$(render "${UTF8:-C}" "$width" "$cenv" $args)"
 
   # 1. Golden file.
   if [[ ! -f "$fixture" ]]; then
@@ -108,7 +130,7 @@ while IFS='|' read -r name width args; do
   #    characters, must be byte-identical.
   if [[ -n "$UTF8" ]]; then
     # shellcheck disable=SC2086
-    posix_out="$(render POSIX "$width" $args)"
+    posix_out="$(render POSIX "$width" "$cenv" $args)"
     if [[ "$posix_out" == "$out" ]]; then
       pass "locale $name: POSIX render matches $UTF8"
     else

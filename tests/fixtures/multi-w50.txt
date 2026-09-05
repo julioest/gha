@@ -1,0 +1,16 @@
+3 repos   ✓ 4  ✗ 4  ● 2  ○ 2  ⊘ 1  · updated 12s ago
+──────────────────────────────────────────────────
+state · repo · title · when
+  ●  demo/api          Production deploy (demo)   
+  ○  demo/infra        Rotate the staging… 20s ago
+  ○  demo/api          Bump dependencies … 40s ago
+  ●  demo/web-fronte…  Upgrade eslint to v9       
+  ✓  demo/api          Make the runs tabl… 52s ago
+  ✓  demo/web-fronte…  Drop the legacy dat… 6m ago
+  ✗  demo/api          Try to fix the fla… 28m ago
+  ✓  demo/infra        Pin the runner ima… 34m ago
+  ✗  demo/web-fronte…  Nav bar overlaps t… 58m ago
+  ✓  demo/api          🚀 Ship the release… 1h ago
+  ✗  demo/api          ⚠️ Retry storm in th… 2h ago
+  ⊘  demo/api          Rewrite the fixture… 3h ago
+  ✗  demo/infra        Nightly drift check… 5h ago

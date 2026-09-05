@@ -1,0 +1,16 @@
+3 repos   ✓ 4  ✗ 4  ● 2  ○ 2  ⊘ 1  · updated 12s ago
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+state · repo · workflow · branch · event · title · took · when
+  ●  demo/api            Deploy         develop               chain  Production deploy (demo)                      0:12 
+  ○  demo/infra          Terraform      main                  man    Rotate the staging database credent… queued 20s ago
+  ○  demo/api            Lint           chore/bump-deps       PR     Bump dependencies to latest          queued 40s ago
+  ●  demo/web-frontend   Lint           main                  push   Upgrade eslint to v9                          2:00 
+  ✓  demo/api            CI             develop               push   Make the runs table responsive at any… 4m8s 52s ago
+  ✓  demo/web-frontend   Test           main                  push   Drop the legacy date picker            3m18s 6m ago
+  ✗  demo/api            CI             fix-flaky-test        PR     Try to fix the flaky integration tes… 1m35s 28m ago
+  ✓  demo/infra          Terraform      main                  push   Pin the runner image to 24.04         5m25s 34m ago
+  ✗  demo/web-frontend   Test           redesign/nav-bar      PR     Nav bar overlaps the banner below 90… 1m51s 58m ago
+  ✓  demo/api            Release        機能/検索ページ       rel    🚀 Ship the release pipeline           3m10s 1h ago
+  ✗  demo/api            CI             hotfix/queue-worker   push   ⚠️ Retry storm in the queue worker afte… 2m0s 2h ago
+  ⊘  demo/api            Integration    experiment/very-lon…  man    Rewrite the fixture harness so that ev… 7m0s 3h ago
+  ✗  demo/infra          Nightly        main                  cron   Nightly drift check found 3 unmanaged … 4m0s 5h ago

@@ -1,0 +1,16 @@
+3 repos   ✓ 4  ✗ 4  ● 2  ○ 2  ⊘ 1  · updated 12s ago
+────────────────────────────────────────────────────────────────────────────────────────────────────
+state · repo · branch · title · took · when
+  ●  demo/api            develop               Production deploy (demo)                        0:12 
+  ○  demo/infra          main                  Rotate the staging database credentia… queued 20s ago
+  ○  demo/api            chore/bump-deps       Bump dependencies to latest            queued 40s ago
+  ●  demo/web-frontend   main                  Upgrade eslint to v9                            2:00 
+  ✓  demo/api            develop               Make the runs table responsive at any w… 4m8s 52s ago
+  ✓  demo/web-frontend   main                  Drop the legacy date picker              3m18s 6m ago
+  ✗  demo/api            fix-flaky-test        Try to fix the flaky integration test … 1m35s 28m ago
+  ✓  demo/infra          main                  Pin the runner image to 24.04           5m25s 34m ago
+  ✗  demo/web-frontend   redesign/nav-bar      Nav bar overlaps the banner below 900px 1m51s 58m ago
+  ✓  demo/api            機能/検索ページ       🚀 Ship the release pipeline             3m10s 1h ago
+  ✗  demo/api            hotfix/queue-worker   ⚠️ Retry storm in the queue worker after … 2m0s 2h ago
+  ⊘  demo/api            experiment/very-lon…  Rewrite the fixture harness so that ever… 7m0s 3h ago
+  ✗  demo/infra          main                  Nightly drift check found 3 unmanaged re… 4m0s 5h ago
