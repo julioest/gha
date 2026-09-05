@@ -26,6 +26,15 @@
 
 set -euo pipefail
 
+die()  { printf 'gha: %s\n' "$1" >&2; exit "${2:-1}"; }
+# need CMD HINT — hard-fail with a useful message instead of the empty result
+# that a missing dependency used to produce.
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required but not installed${2:+ $2}"; }
+# usage — the header comment block, printed as help. Reads until the first
+# non-comment line rather than a fixed line range, so editing the header (or
+# adding a flag to it) can't truncate the help or leak code into it.
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"; }
+
 limit=15
 branch=""
 all=true
@@ -63,11 +72,18 @@ while [[ $# -gt 0 ]]; do
     --web)       web=true; shift ;;
     --bare)      bare=true; shift ;;         # hide the column-label header line
     --ascii)     ascii=true; shift ;;        # plain marks for symbol-less fonts
-    -h|--help)   sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)   usage; exit 0 ;;
     -*)          echo "gha: unknown flag $1" >&2; exit 2 ;;
     *)           branch="$1"; all=false; shift ;;
   esac
 done
+
+# Dependencies. jq parses every code path including --demo; gh is only skipped
+# for --demo, which serves synthetic data. Checked after option parsing so -h
+# still works on a machine with neither installed.
+need jq "(https://jqlang.github.io/jq/)"
+[[ -n "${GHA_DEMO:-}" ]] || need gh "(https://cli.github.com)"
+[[ "$limit" =~ ^[0-9]+$ ]] || die "-n takes a number, got '$limit'" 2
 
 if ! $all && [[ -z "$branch" ]]; then
   branch="$(git branch --show-current 2>/dev/null || true)"
@@ -222,15 +238,45 @@ JSON
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/gha"
 cache_file() { printf '%s/%s.json' "$CACHE_DIR" "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"; }
 cache_age()  { local m; m=$(file_mtime "$1"); echo $(( $(date +%s) - m )); }
+# unstick_lock DIR — both refresh paths lock with mkdir, which a killed job
+# leaves behind forever; drop one that's too old to belong to a live fetch.
+unstick_lock() {
+  if [[ -d "$1" ]] && (( $(cache_age "$1") > 30 )); then rmdir "$1" 2>/dev/null || true; fi
+}
+# prune_cache — the cache is append-only otherwise: one entry per repo/branch/
+# limit combination and one per run ever previewed. Guarded by a daily stamp so
+# it costs nothing on the hot path.
+prune_cache() {
+  local stamp="$CACHE_DIR/.pruned"
+  [[ -d "$CACHE_DIR" ]] || return 0
+  [[ -f "$stamp" ]] && (( $(cache_age "$stamp") < 86400 )) && return 0
+  : > "$stamp" 2>/dev/null || true
+  find "$CACHE_DIR" -maxdepth 1 -type f \( -name '*.json' -o -name 'prev-*.txt' \) \
+       -mtime +7 -delete 2>/dev/null || true
+  find "$CACHE_DIR" -maxdepth 1 -type f \( -name '*.tmp' -o -name '*.bg' \) \
+       -mtime +1 -delete 2>/dev/null || true
+  find "$CACHE_DIR" -maxdepth 1 -type d -name '*.lock' -mtime +1 \
+       -exec rmdir {} + 2>/dev/null || true
+  return 0
+}
 
 _fetch_sync() {                      # $1=cache file — fetch now, write atomically
-  local tmp="$1.$$.tmp"
-  if gh "${list_args[@]}" > "$tmp" 2>/dev/null; then mv -f "$tmp" "$1"
-  else rm -f "$tmp"; [[ -f "$1" ]] || printf '[]' > "$1"; fi
+  local tmp="$1.$$.tmp" err="$1.$$.err" rc=0 msg
+  gh "${list_args[@]}" > "$tmp" 2>"$err" || rc=$?
+  if (( rc == 0 )); then mv -f "$tmp" "$1"; rm -f "$err"; return 0; fi
+  # A bad token, a missing repo and a dropped network used to be written out as
+  # `[]`, i.e. reported as "No runs found" with exit 0. Pass gh's own words on.
+  rm -f "$tmp"
+  msg="$(grep -v '^[[:space:]]*$' "$err" 2>/dev/null | head -3 | tr '\n' ' ')"; rm -f "$err"
+  msg="${msg:-gh run list failed}"
+  if [[ -f "$1" ]]; then                  # stale data beats no data; still warn
+    printf 'gha: %s\ngha: showing cached results\n' "$msg" >&2; return 0
+  fi
+  printf 'gha: %s\n' "$msg" >&2; return 1
 }
 _refresh_bg() {                      # $1=cache file — fetch in background, lock-guarded
   local lock="$1.lock"
-  if [[ -d "$lock" ]] && (( $(cache_age "$lock") > 30 )); then rmdir "$lock" 2>/dev/null || true; fi
+  unstick_lock "$lock"
   if mkdir "$lock" 2>/dev/null; then
     ( gh "${list_args[@]}" > "$1.bg" 2>/dev/null && mv -f "$1.bg" "$1"; rmdir "$lock" 2>/dev/null || true ) &
     disown 2>/dev/null || true
@@ -242,17 +288,18 @@ _refresh_bg() {                      # $1=cache file — fetch in background, lo
 fetch_runs() {
   [[ -n "${GHA_DEMO:-}" ]] && { demo_json; return; }
   mkdir -p "$CACHE_DIR" 2>/dev/null || true
+  prune_cache
   local file ttl age
   file="$(cache_file "${repo}|${all}|${branch}|${limit}|${failed_only}")"
   ttl="${GHA_POLL:-6}"
   if [[ -n "${GHA_CACHED:-}" ]]; then
-    [[ -f "$file" ]] || _fetch_sync "$file"            # cold start: one sync fetch
+    [[ -f "$file" ]] || _fetch_sync "$file" || return 1   # cold start: one sync fetch
     age=$(cache_age "$file"); if (( age >= ttl )); then _refresh_bg "$file"; fi
     cat "$file" 2>/dev/null || printf '[]'
   else
     if [[ -f "$file" ]]; then age=$(cache_age "$file"); else age=999; fi
     if (( age < 3 )); then cat "$file"                 # dedupe rapid manual repeats
-    else _fetch_sync "$file"; cat "$file" 2>/dev/null || printf '[]'; fi
+    else _fetch_sync "$file" || return 1; cat "$file" 2>/dev/null || printf '[]'; fi
   fi
 }
 
@@ -375,6 +422,7 @@ if [[ "$mode" == preview ]]; then
   elif [[ -f "$pf" ]]; then
     cat "$pf"                                    # show cached instantly…
     lock="$pf.lock"                              # …refresh in background
+    unstick_lock "$lock"
     if mkdir "$lock" 2>/dev/null; then
       ( _gen_preview > "$pf.bg" 2>/dev/null && mv -f "$pf.bg" "$pf"; rmdir "$lock" 2>/dev/null || true ) &
       disown 2>/dev/null || true
